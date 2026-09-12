@@ -1,0 +1,10 @@
+node_modules/
+
+# SQLite 資料庫（含帳號、密碼雜湊、測驗與作答紀錄，不可上傳）
+data.db
+data.db-shm
+data.db-wal
+
+# 環境變數 / 自動產生的簽章密鑰
+.env
+.secret
