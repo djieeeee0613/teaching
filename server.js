@@ -137,13 +137,62 @@ app.post('/api/auth/register', wrap(async (req, res) => {
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, role } = req.body || {};
   const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [email || '']);
   const user = rows[0];
   if (!user || !verifyPassword(password || '', user.password_hash)) {
     return res.status(401).json({ error: 'email 或密碼錯誤' });
   }
+  // 前端會先選「我是老師／我是學生」再登入；如果選的身份跟帳號實際身份不符，直接擋下來，
+  // 避免學生誤用老師入口（或反過來）登入自己的帳號。
+  if (role && role !== user.role) {
+    const actualLabel = user.role === 'teacher' ? '教師' : '學生';
+    return res.status(403).json({ error: `此帳號是${actualLabel}帳號，請從「我是${actualLabel}」入口登入` });
+  }
   res.json({ token: signToken({ id: user.id }), user: publicUser(user) });
+}));
+
+// 兩端首頁總覽用的統計數字
+app.get('/api/dashboard', auth, wrap(async (req, res) => {
+  if (req.user.role === 'teacher') {
+    const { rows } = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM classes WHERE teacher_id = $1) AS class_count,
+        (SELECT COUNT(DISTINCT e.student_id) FROM enrollments e JOIN classes c ON c.id = e.class_id WHERE c.teacher_id = $1) AS student_count,
+        (SELECT COUNT(*) FROM quizzes z JOIN classes c ON c.id = z.class_id WHERE c.teacher_id = $1) AS quiz_count,
+        (SELECT COUNT(*) FROM question_answers qa
+           JOIN quiz_submissions s ON s.id = qa.quiz_submission_id
+           JOIN quizzes z ON z.id = s.quiz_id
+           JOIN classes c ON c.id = z.class_id
+           WHERE c.teacher_id = $1 AND qa.status != 'graded') AS pending_grading_count
+    `, [req.user.id]);
+    const r = rows[0];
+    return res.json({
+      classCount: Number(r.class_count),
+      studentCount: Number(r.student_count),
+      quizCount: Number(r.quiz_count),
+      pendingGradingCount: Number(r.pending_grading_count),
+    });
+  }
+  const { rows } = await pool.query(`
+    SELECT
+      (SELECT COUNT(*) FROM enrollments WHERE student_id = $1) AS class_count,
+      (SELECT COUNT(*) FROM quizzes z JOIN enrollments e ON e.class_id = z.class_id
+         WHERE e.student_id = $1
+         AND NOT EXISTS (SELECT 1 FROM quiz_submissions s WHERE s.quiz_id = z.id AND s.student_id = $1)
+      ) AS pending_quiz_count,
+      (SELECT COUNT(*) FROM quiz_submissions s
+         JOIN quizzes z ON z.id = s.quiz_id
+         JOIN enrollments e ON e.class_id = z.class_id AND e.student_id = $1
+         WHERE s.student_id = $1
+      ) AS completed_quiz_count
+  `, [req.user.id]);
+  const r = rows[0];
+  res.json({
+    classCount: Number(r.class_count),
+    pendingQuizCount: Number(r.pending_quiz_count),
+    completedQuizCount: Number(r.completed_quiz_count),
+  });
 }));
 
 app.get('/api/me', auth, (req, res) => res.json({ user: publicUser(req.user) }));
@@ -390,6 +439,101 @@ app.post('/api/classes/:id/quizzes', auth, requireRole('teacher'), wrap(async (r
     }
     await client.query('COMMIT');
     res.json({ id: quizId, ok: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}));
+
+// 編輯已發布的測驗（就算學生已經作答完畢也能改）：
+// 題目陣列裡帶 id 的視為修改既有題目，沒帶 id 的視為新題目；
+// 原本存在但這次沒出現在陣列裡的題目視為被刪除，連同該題學生的作答一起移除（其他題目的作答不受影響）。
+app.put('/api/quizzes/:id', auth, requireRole('teacher'), wrap(async (req, res) => {
+  const zRes = await pool.query('SELECT * FROM quizzes WHERE id = $1', [req.params.id]);
+  const z = zRes.rows[0];
+  if (!z || z.teacher_id !== req.user.id) return res.status(403).json({ error: '權限不足' });
+
+  const { title, dueDate = null, questions, kind = 'normal' } = req.body || {};
+  if (!title || !title.trim()) return res.status(400).json({ error: '請輸入測驗標題' });
+  if (!['normal', 'pretest', 'posttest'].includes(kind)) {
+    return res.status(400).json({ error: '測驗類型不正確' });
+  }
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res.status(400).json({ error: '請至少保留一題' });
+  }
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    if (!q.description || !q.description.trim()) {
+      return res.status(400).json({ error: `第 ${i + 1} 題請輸入題目說明` });
+    }
+    if (!['single', 'multiple', 'short'].includes(q.type)) {
+      return res.status(400).json({ error: `第 ${i + 1} 題的題型不正確` });
+    }
+    if (q.type !== 'short') {
+      const opts = (q.options || []).map((s) => String(s).trim()).filter(Boolean);
+      if (opts.length < 2) return res.status(400).json({ error: `第 ${i + 1} 題選擇題至少需要兩個選項` });
+      if (q.type === 'single' && typeof q.answerKey !== 'number') {
+        return res.status(400).json({ error: `第 ${i + 1} 題請設定正解` });
+      }
+      if (q.type === 'multiple' && (!Array.isArray(q.answerKey) || q.answerKey.length === 0)) {
+        return res.status(400).json({ error: `第 ${i + 1} 題請至少勾選一個正解` });
+      }
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'UPDATE quizzes SET title = $1, kind = $2, due_date = $3 WHERE id = $4',
+      [title.trim(), kind, dueDate || null, z.id]
+    );
+
+    const existingRes = await client.query('SELECT id FROM questions WHERE quiz_id = $1', [z.id]);
+    const existingIds = new Set(existingRes.rows.map((r) => r.id));
+    const keptIds = new Set();
+    let addedNewQuestion = false;
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      const opts = q.type === 'short' ? [] : q.options.map((s) => String(s).trim()).filter(Boolean);
+      const answerKeyJson = JSON.stringify(q.type === 'short' ? '' : q.answerKey);
+      if (q.id && existingIds.has(q.id)) {
+        await client.query(
+          'UPDATE questions SET seq = $1, description = $2, type = $3, options = $4, answer_key = $5 WHERE id = $6',
+          [i + 1, q.description.trim(), q.type, JSON.stringify(opts), answerKeyJson, q.id]
+        );
+        keptIds.add(q.id);
+      } else {
+        const ins = await client.query(
+          `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [z.id, i + 1, q.description.trim(), q.type, JSON.stringify(opts), answerKeyJson]
+        );
+        keptIds.add(ins.rows[0].id);
+        addedNewQuestion = true;
+      }
+    }
+
+    const removedIds = [...existingIds].filter((id) => !keptIds.has(id));
+    if (removedIds.length) {
+      await client.query('DELETE FROM question_answers WHERE question_id = ANY($1::int[])', [removedIds]);
+      await client.query('DELETE FROM questions WHERE id = ANY($1::int[])', [removedIds]);
+    }
+
+    // 新增了題目的話，已經交過卷的學生就少答了這一題：把他們的整份測驗狀態退回「待批改」，
+    // 不然分數計算會因為新題目沒有作答紀錄而卡在 null，畫面顯示會壞掉。
+    if (addedNewQuestion) {
+      await client.query(
+        `UPDATE quiz_submissions SET status = 'submitted', graded_at = NULL WHERE quiz_id = $1 AND status = 'graded'`,
+        [z.id]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
   } catch (e) {
     await client.query('ROLLBACK');
     throw e;

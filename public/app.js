@@ -80,7 +80,7 @@ function AuthScreen({ onLogin }) {
     setErr(''); setBusy(true);
     try {
       const path = mode === 'login' ? '/auth/login' : '/auth/register';
-      const body = mode === 'login' ? { email: form.email, password: form.password } : { ...form, role };
+      const body = mode === 'login' ? { email: form.email, password: form.password, role } : { ...form, role };
       const { token, user } = await api(path, { method: 'POST', body });
       tokenStore.set(token);
       onLogin(user);
@@ -118,17 +118,105 @@ function AuthScreen({ onLogin }) {
 }
 
 // ========================================================================
+// 首頁總覽：打招呼、日期、天氣、幾個重點數字 —— 兩端首頁共用
+// ========================================================================
+
+const WEEKDAY = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
+const friendlyDate = () => {
+  const d = new Date();
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${WEEKDAY[d.getDay()]}`;
+};
+
+function weatherIcon(code) {
+  if (code === 0) return '☀️';
+  if ([1, 2, 3].includes(code)) return '⛅';
+  if ([45, 48].includes(code)) return '🌫️';
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return '🌧️';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return '❄️';
+  if ([95, 96, 99].includes(code)) return '⛈️';
+  return '🌤️';
+}
+
+// 免金鑰的公開天氣 API；先試瀏覽器定位，拿不到就預設台北。
+// 有些瀏覽器/環境對 geolocation 的權限請求會整個卡住、不呼叫 success 也不呼叫 error
+// （навigator 自己的 timeout 選項在那種情況下不會生效），所以另外加一個獨立的保險計時器，
+// 確保天氣小工具最慢 3 秒內一定會顯示東西，不會一直空著。
+function useWeather() {
+  const [weather, setWeather] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    let settled = false;
+    const fetchWeather = (lat, lon) => {
+      fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code`)
+        .then((r) => r.json())
+        .then((d) => { if (!cancelled) setWeather({ temp: Math.round(d.current.temperature_2m), code: d.current.weather_code }); })
+        .catch(() => {});
+    };
+    // 定位成功、定位失敗、保險計時器三條路徑都走同一個 settle()，
+    // 用單一的 settled 旗標避免像之前那樣「兩層各自判斷 done」互相卡住、fetchWeather 永遠叫不到的問題。
+    const settle = (lat, lon) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(safetyTimer);
+      fetchWeather(lat, lon);
+    };
+    const safetyTimer = setTimeout(() => settle(25.033, 121.5654), 3000);
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => settle(pos.coords.latitude, pos.coords.longitude),
+        () => settle(25.033, 121.5654),
+        { timeout: 4000 }
+      );
+    } else {
+      settle(25.033, 121.5654);
+    }
+    return () => { cancelled = true; clearTimeout(safetyTimer); };
+  }, []);
+  return weather;
+}
+
+function Dashboard({ user, stats }) {
+  const weather = useWeather();
+  return (
+    <div className="card" style={{ background: 'var(--accent-grad)', color: '#fff', border: 'none' }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'nowrap' }}>
+        <div>
+          <h1 style={{ color: '#fff', marginTop: 0 }}>嗨，{user.name}！👋</h1>
+          <p style={{ opacity: .95, margin: 0 }}>{friendlyDate()}</p>
+        </div>
+        {weather && (
+          <div style={{ fontSize: 26, fontWeight: 700, whiteSpace: 'nowrap' }}>
+            {weatherIcon(weather.code)} {weather.temp}°C
+          </div>
+        )}
+      </div>
+      {stats && (
+        <div className="row" style={{ marginTop: 14 }}>
+          {stats.map((s, i) => (
+            <div key={i} style={{ background: 'rgba(255,255,255,.22)', borderRadius: 12, padding: '8px 16px' }}>
+              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.2 }}>{s.value}</div>
+              <div style={{ fontSize: 12, opacity: .95 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========================================================================
 // 教師端
 // ========================================================================
 
-function TeacherHome({ onEnterCourse, onEnterManage }) {
+function TeacherHome({ user, onEnterCourse, onEnterManage }) {
   const [classes, setClasses] = useState([]);
+  const [stats, setStats] = useState(null);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
   const load = useCallback(() => api('/classes').then(setClasses), []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); api('/dashboard').then(setStats); }, [load]);
 
   const createClass = async (e) => {
     e.preventDefault();
@@ -154,6 +242,12 @@ function TeacherHome({ onEnterCourse, onEnterManage }) {
 
   return (
     <div className="wrap">
+      <Dashboard user={user} stats={stats && [
+        { label: '課程數', value: stats.classCount },
+        { label: '學生數', value: stats.studentCount },
+        { label: '測驗數', value: stats.quizCount },
+        { label: '待批改', value: stats.pendingGradingCount },
+      ]} />
       <form className="card" onSubmit={createClass}>
         <h2>開新課程 / 班級</h2>
         <div className="row">
@@ -241,11 +335,29 @@ function QuestionEditor({ q, index, onChange, onRemove, removable }) {
   );
 }
 
-function QuizBuilder({ classId, onSaved }) {
-  const [title, setTitle] = useState('');
-  const [kind, setKind] = useState('normal');
-  const [dueDate, setDueDate] = useState('');
-  const [questions, setQuestions] = useState([blankQuestion()]);
+// 把後端回傳的題目（含正解）轉成編輯器要用的本機狀態
+function questionToEditorState(apiQ) {
+  return {
+    id: apiQ.id,
+    description: apiQ.description,
+    type: apiQ.type,
+    options: apiQ.type === 'short' ? ['', ''] : (apiQ.options.length ? apiQ.options : ['', '']),
+    answerSingle: apiQ.type === 'single' ? apiQ.answerKey : 0,
+    answerMulti: apiQ.type === 'multiple' ? apiQ.answerKey : [],
+  };
+}
+
+// existingQuiz 有帶值就是編輯既有測驗（PUT），沒帶就是新增（POST）。
+// 編輯模式下就算學生已經作答完畢，題目說明／選項／正解都還能改，也能增刪題目；
+// 刪掉的題目連同該題的學生作答會一併移除，其他題目不受影響。
+function QuizBuilder({ classId, existingQuiz, onSaved, onCancelEdit }) {
+  const isEdit = !!existingQuiz;
+  const [title, setTitle] = useState(existingQuiz?.title || '');
+  const [kind, setKind] = useState(existingQuiz?.kind || 'normal');
+  const [dueDate, setDueDate] = useState(existingQuiz?.dueDate || '');
+  const [questions, setQuestions] = useState(
+    existingQuiz ? existingQuiz.questions.map(questionToEditorState) : [blankQuestion()]
+  );
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
@@ -276,16 +388,21 @@ function QuizBuilder({ classId, onSaved }) {
       const payload = {
         title, kind, dueDate: dueDate || null,
         questions: questions.map((q) => ({
+          id: q.id,
           description: q.description,
           type: q.type,
           options: q.type === 'short' ? [] : q.options.map((s) => s.trim()).filter(Boolean),
           answerKey: q.type === 'short' ? '' : (q.type === 'single' ? q.answerSingle : q.answerMulti),
         })),
       };
-      await api('/classes/' + classId + '/quizzes', { method: 'POST', body: payload });
-      reset();
+      if (isEdit) {
+        await api('/quizzes/' + existingQuiz.id, { method: 'PUT', body: payload });
+      } else {
+        await api('/classes/' + classId + '/quizzes', { method: 'POST', body: payload });
+        reset();
+      }
       onSaved();
-      setToast('✅ 已儲存測驗！');
+      setToast(isEdit ? '✅ 已更新測驗！' : '✅ 已儲存測驗！');
       setTimeout(() => setToast(''), 3000);
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
@@ -297,7 +414,8 @@ function QuizBuilder({ classId, onSaved }) {
           {toast}
         </div>
       )}
-      <h1 style={{ marginTop: 0 }}>新增測驗</h1>
+      <h1 style={{ marginTop: 0 }}>{isEdit ? '編輯測驗' : '新增測驗'}</h1>
+      {isEdit && <p className="muted">學生已經作答的部分不會被清空，只有你刪掉的題目才會連同該題作答一起移除。</p>}
       <label>測驗標題<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：第三週小考" required /></label>
       <div className="row">
         <div style={{ flex: 1 }}>
@@ -317,7 +435,7 @@ function QuizBuilder({ classId, onSaved }) {
       <div style={{ marginTop: 16 }}>
         {questions.map((q, i) => (
           <QuestionEditor
-            key={i}
+            key={q.id ?? 'new' + i}
             q={q}
             index={i}
             removable={questions.length > 1}
@@ -332,8 +450,9 @@ function QuizBuilder({ classId, onSaved }) {
       </div>
 
       {err && <div className="err">{err}</div>}
-      <div style={{ marginTop: 16 }}>
-        <button disabled={busy}>儲存測驗</button>
+      <div className="row" style={{ marginTop: 16 }}>
+        <button disabled={busy}>{isEdit ? '儲存修改' : '儲存測驗'}</button>
+        {isEdit && <button type="button" className="ghost" onClick={onCancelEdit}>取消編輯</button>}
       </div>
     </form>
   );
@@ -353,6 +472,53 @@ function CorrectAnswerHint({ a }) {
   return <div className="muted">正確答案：{text}</div>;
 }
 
+// 測驗個別總覽：交卷/批改進度、平均分、每題答對率（客觀題）
+function QuizOverview({ subs }) {
+  const total = subs.length;
+  const gradedSubs = subs.filter((s) => s.status === 'graded');
+  const subAverages = subs.map((s) => {
+    const scores = s.answers.map((a) => a.score).filter((x) => x != null);
+    return scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
+  }).filter((x) => x != null);
+  const overallAvg = subAverages.length
+    ? Math.round((subAverages.reduce((a, b) => a + b, 0) / subAverages.length) * 10) / 10
+    : null;
+
+  const questionStats = {};
+  subs.forEach((s) => {
+    s.answers.forEach((a) => {
+      if (a.type === 'short') return;
+      if (!questionStats[a.seq]) questionStats[a.seq] = { correct: 0, graded: 0 };
+      if (a.status === 'graded') {
+        questionStats[a.seq].graded += 1;
+        if (a.score === 100) questionStats[a.seq].correct += 1;
+      }
+    });
+  });
+  const questionEntries = Object.entries(questionStats).sort((a, b) => Number(a[0]) - Number(b[0]));
+
+  return (
+    <div className="card">
+      <h2>測驗總覽</h2>
+      <div className="row" style={{ marginTop: 8 }}>
+        <span className="tag">{total} 人交卷</span>
+        <span className="tag ok">{gradedSubs.length} 已批改</span>
+        <span className="tag wait">{total - gradedSubs.length} 待批改</span>
+        {overallAvg != null && <span className="tag pre">平均 {overallAvg} 分</span>}
+      </div>
+      {questionEntries.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {questionEntries.map(([seq, s]) => (
+            <div key={seq} className="muted" style={{ marginTop: 4 }}>
+              第 {seq} 題：{s.graded > 0 ? Math.round((s.correct / s.graded) * 100) + '% 答對' : '尚無已批改的作答'}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TeacherQuizDetail({ quiz, onBack }) {
   const [subs, setSubs] = useState(null);
   const load = useCallback(() => api('/quizzes/' + quiz.id + '/submissions').then(setSubs), [quiz.id]);
@@ -362,6 +528,7 @@ function TeacherQuizDetail({ quiz, onBack }) {
     <div>
       <button className="ghost" onClick={onBack}>← 返回課程</button>
       <h1>{quiz.title} <KindTag kind={quiz.kind} /></h1>
+      {subs && subs.length > 0 && <QuizOverview subs={subs} />}
       <h2 style={{ marginTop: 20 }}>學生作答 ({subs ? subs.length : '…'})</h2>
       {subs && subs.length === 0 && <p className="muted">還沒有人作答。</p>}
       {subs && subs.map((s) => <StudentSubmissionCard key={s.id} sub={s} onGraded={load} />)}
@@ -433,6 +600,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
 function TeacherCourse({ cls, onBack }) {
   const [list, setList] = useState([]);
   const [selectedQuiz, setSelectedQuiz] = useState(null);
+  const [editingQuiz, setEditingQuiz] = useState(null); // 完整測驗資料（含正解），編輯用
   const load = useCallback(() => api('/classes/' + cls.id + '/quizzes').then(setList), [cls.id]);
   useEffect(() => { load(); }, [load]);
 
@@ -440,11 +608,19 @@ function TeacherCourse({ cls, onBack }) {
     return <div className="wrap"><TeacherQuizDetail quiz={selectedQuiz} onBack={() => { setSelectedQuiz(null); load(); }} /></div>;
   }
 
+  const startEdit = async (z) => setEditingQuiz(await api('/quizzes/' + z.id));
+
   return (
     <div className="wrap">
       <button className="ghost" onClick={onBack}>← 返回首頁</button>
       <h1>{cls.name}</h1>
-      <QuizBuilder classId={cls.id} onSaved={load} />
+      <QuizBuilder
+        key={editingQuiz ? 'edit-' + editingQuiz.id : 'new'}
+        classId={cls.id}
+        existingQuiz={editingQuiz}
+        onSaved={() => { setEditingQuiz(null); load(); }}
+        onCancelEdit={() => setEditingQuiz(null)}
+      />
       <h2 style={{ marginTop: 24 }}>此課程的測驗</h2>
       {list.length === 0 && <p className="muted">還沒有發布任何測驗。</p>}
       {list.map((z) => (
@@ -459,8 +635,9 @@ function TeacherCourse({ cls, onBack }) {
             </div>
             <span className="tag">{z.gradedCount}/{z.submissionCount} 已批改</span>
           </div>
-          <div style={{ marginTop: 10 }}>
+          <div className="row" style={{ marginTop: 10 }}>
             <button className="ghost" onClick={() => setSelectedQuiz(z)}>查看作答 / 批改</button>
+            <button className="ghost" onClick={() => startEdit(z)}>編輯題目</button>
           </div>
         </div>
       ))}
@@ -573,7 +750,7 @@ function TeacherManage({ cls, onBack }) {
   );
 }
 
-function TeacherApp() {
+function TeacherApp({ user }) {
   const [view, setView] = useState('home');
   const [cls, setCls] = useState(null);
 
@@ -585,6 +762,7 @@ function TeacherApp() {
   }
   return (
     <TeacherHome
+      user={user}
       onEnterCourse={(c) => { setCls(c); setView('course'); }}
       onEnterManage={(c) => { setCls(c); setView('manage'); }}
     />
@@ -595,14 +773,15 @@ function TeacherApp() {
 // 學生端
 // ========================================================================
 
-function StudentHome({ onEnterCourse }) {
+function StudentHome({ user, onEnterCourse }) {
   const [classes, setClasses] = useState([]);
+  const [stats, setStats] = useState(null);
   const [code, setCode] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => api('/classes').then(setClasses), []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); api('/dashboard').then(setStats); }, [load]);
 
   const join = async (e) => {
     e.preventDefault();
@@ -628,6 +807,11 @@ function StudentHome({ onEnterCourse }) {
 
   return (
     <div className="wrap">
+      <Dashboard user={user} stats={stats && [
+        { label: '已加入課程', value: stats.classCount },
+        { label: '待完成測驗', value: stats.pendingQuizCount },
+        { label: '已完成測驗', value: stats.completedQuizCount },
+      ]} />
       <form className="card" onSubmit={join}>
         <h2>加入課程</h2>
         <div className="row">
@@ -734,6 +918,10 @@ function QuizResult({ quizSummary }) {
   const [detail, setDetail] = useState(null);
   useEffect(() => { api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail); }, [quizSummary.id]);
 
+  const gradedAnswers = detail ? detail.answers.filter((a) => a.status === 'graded') : [];
+  const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
+  const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;
+
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -742,6 +930,12 @@ function QuizResult({ quizSummary }) {
           {quizSummary.myStatus === 'graded' ? (quizSummary.myScore + ' 分') : '部分待批改'}
         </span>
       </div>
+      {detail && (
+        <p className="muted">
+          共 {detail.answers.length} 題，已批改 {gradedAnswers.length} 題
+          {objectiveGraded > 0 && `，選擇題答對 ${correctCount}/${objectiveGraded} 題`}
+        </p>
+      )}
       {!detail && <p className="muted">載入中…</p>}
       {detail && detail.answers.map((a) => (
         <div key={a.questionId} style={{ borderTop: '1px solid var(--border)', marginTop: 12, paddingTop: 12 }}>
@@ -861,10 +1055,10 @@ function StudentCourse({ cls, onBack }) {
   );
 }
 
-function StudentApp() {
+function StudentApp({ user }) {
   const [cls, setCls] = useState(null);
   if (cls) return <StudentCourse cls={cls} onBack={() => setCls(null)} />;
-  return <StudentHome onEnterCourse={setCls} />;
+  return <StudentHome user={user} onEnterCourse={setCls} />;
 }
 
 // ---------- Root ----------
@@ -891,7 +1085,7 @@ function App() {
           <a href="#" onClick={(e) => { e.preventDefault(); logout(); }}>登出</a>
         </span>
       </header>
-      {user.role === 'teacher' ? <TeacherApp /> : <StudentApp />}
+      {user.role === 'teacher' ? <TeacherApp user={user} /> : <StudentApp user={user} />}
     </>
   );
 }
