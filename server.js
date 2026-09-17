@@ -15,6 +15,18 @@ const PORT = process.env.PORT || 3000;
 // 統一交給下面的錯誤處理 middleware 回應 JSON，而不是變成沒有回應或 Express 預設的 HTML 錯誤頁。
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// 交易要用專屬連線時用這個，而不是直接 pool.connect()：
+// pg 的 Client 物件如果連線中途被伺服器斷開（例如雲端 Postgres 的連線池把閒置連線收回），
+// 會在這個 client 上單獨 emit 一個 'error' 事件；沒有人監聽的話 Node 預設行為是直接把整個
+// process 炸掉。這裡統一補上監聽器，讓這種暫時性斷線只是記一筆 log，不會弄垮整個伺服器。
+async function getClient() {
+  const client = await pool.connect();
+  client.on('error', (err) => {
+    console.error('資料庫連線中途發生錯誤（已攔截，不會讓伺服器當掉）：', err.message);
+  });
+  return client;
+}
+
 // ---------- helpers ----------
 const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role });
 
@@ -42,16 +54,42 @@ const parse = (s, fallback) => {
   try { return JSON.parse(s); } catch { return fallback; }
 };
 
-// 自動批改（選擇題）；簡答題回傳 null 交由老師批改
+// 把簡答題「標準答案」拆成關鍵字：用逗號/頓號/分號/空白/換行分隔，去掉空白項目
+function splitKeywords(refText) {
+  return String(refText || '')
+    .split(/[,，、;；\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// 自動批改：
+// - 單選：全對 100，全錯 0
+// - 多選：按比例給分——選對一個正解得 (100/正解數)，多選一個錯的就倒扣同樣比例，最低 0 分
+//   例：4 個正解，選對 1 個 = 25 分；選對 2 個 = 50 分；選對 2 個又多選 1 個錯的 = 25 分
+// - 簡答：老師若有設「標準答案」關鍵字，學生作答只要包含任一關鍵字就直接給 100 分；
+//   沒對到關鍵字，或老師根本沒設標準答案，回傳 null 交由老師人工批改（不會因為關鍵字沒對到就自動判 0，
+//   避免用詞不同但答對的學生被誤判）
 function autoGrade(type, answerKey, content) {
   if (type === 'single') {
     return Number(content) === Number(answerKey) ? 100 : 0;
   }
   if (type === 'multiple') {
-    const key = [...(parse(answerKey, []))].map(Number).sort();
-    const ans = [...(parse(content, []))].map(Number).sort();
-    const same = key.length === ans.length && key.every((v, i) => v === ans[i]);
-    return same ? 100 : 0;
+    const key = [...(parse(answerKey, []))].map(Number);
+    const ans = [...(parse(content, []))].map(Number);
+    if (key.length === 0) return 0;
+    const keySet = new Set(key);
+    const correctSelected = ans.filter((a) => keySet.has(a)).length;
+    const wrongSelected = ans.filter((a) => !keySet.has(a)).length;
+    const per = 100 / key.length;
+    const raw = (correctSelected - wrongSelected) * per;
+    return Math.max(0, Math.round(raw * 10) / 10);
+  }
+  if (type === 'short') {
+    const keywords = splitKeywords(parse(answerKey, ''));
+    if (keywords.length === 0) return null;
+    const studentAns = String(content ?? '');
+    const matched = keywords.some((k) => studentAns.includes(k));
+    return matched ? 100 : null;
   }
   return null;
 }
@@ -96,7 +134,10 @@ function shapeQuestion(q, { includeAnswer }) {
     type: q.type,
     options: parse(q.options, []),
   };
-  if (includeAnswer) shaped.answerKey = parse(q.answer_key, '');
+  if (includeAnswer) {
+    shaped.answerKey = parse(q.answer_key, '');
+    shaped.explanation = q.explanation || '';
+  }
   return shaped;
 }
 
@@ -249,7 +290,7 @@ app.post('/api/classes/join', auth, requireRole('student'), wrap(async (req, res
 app.delete('/api/classes/:id', auth, requireRole('teacher'), wrap(async (req, res) => {
   const cls = await assertOwnsClass(req, res, req.params.id);
   if (!cls) return;
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     await client.query(`
@@ -281,7 +322,7 @@ app.delete('/api/classes/:id/leave', auth, requireRole('student'), wrap(async (r
   );
   if (!enrolled.rows.length) return res.status(404).json({ error: '你並未加入此課程' });
 
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     await client.query(`
@@ -366,7 +407,7 @@ app.post('/api/classes/:id/attendance', auth, requireRole('teacher'), wrap(async
   const { date, records } = req.body || {};
   if (!date || !Array.isArray(records)) return res.status(400).json({ error: '缺少日期或名單資料' });
 
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     for (const r of records) {
@@ -420,7 +461,7 @@ app.post('/api/classes/:id/quizzes', auth, requireRole('teacher'), wrap(async (r
     }
   }
 
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     const quizRes = await client.query(
@@ -431,10 +472,11 @@ app.post('/api/classes/:id/quizzes', auth, requireRole('teacher'), wrap(async (r
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
       const opts = q.type === 'short' ? [] : q.options.map((s) => String(s).trim()).filter(Boolean);
+      const answerKeyValue = q.type === 'short' ? String(q.answerKey || '').trim() : q.answerKey;
       await client.query(
-        `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [quizId, i + 1, q.description.trim(), q.type, JSON.stringify(opts), JSON.stringify(q.type === 'short' ? '' : q.answerKey)]
+        `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key, explanation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [quizId, i + 1, q.description.trim(), q.type, JSON.stringify(opts), JSON.stringify(answerKeyValue), q.explanation || '']
       );
     }
     await client.query('COMMIT');
@@ -483,7 +525,7 @@ app.put('/api/quizzes/:id', auth, requireRole('teacher'), wrap(async (req, res) 
     }
   }
 
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     await client.query(
@@ -499,18 +541,19 @@ app.put('/api/quizzes/:id', auth, requireRole('teacher'), wrap(async (req, res) 
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
       const opts = q.type === 'short' ? [] : q.options.map((s) => String(s).trim()).filter(Boolean);
-      const answerKeyJson = JSON.stringify(q.type === 'short' ? '' : q.answerKey);
+      const answerKeyValue = q.type === 'short' ? String(q.answerKey || '').trim() : q.answerKey;
+      const answerKeyJson = JSON.stringify(answerKeyValue);
       if (q.id && existingIds.has(q.id)) {
         await client.query(
-          'UPDATE questions SET seq = $1, description = $2, type = $3, options = $4, answer_key = $5 WHERE id = $6',
-          [i + 1, q.description.trim(), q.type, JSON.stringify(opts), answerKeyJson, q.id]
+          'UPDATE questions SET seq = $1, description = $2, type = $3, options = $4, answer_key = $5, explanation = $6 WHERE id = $7',
+          [i + 1, q.description.trim(), q.type, JSON.stringify(opts), answerKeyJson, q.explanation || '', q.id]
         );
         keptIds.add(q.id);
       } else {
         const ins = await client.query(
-          `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-          [z.id, i + 1, q.description.trim(), q.type, JSON.stringify(opts), answerKeyJson]
+          `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key, explanation)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [z.id, i + 1, q.description.trim(), q.type, JSON.stringify(opts), answerKeyJson, q.explanation || '']
         );
         keptIds.add(ins.rows[0].id);
         addedNewQuestion = true;
@@ -625,7 +668,7 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
   const questionsRes = await pool.query('SELECT * FROM questions WHERE quiz_id = $1', [z.id]);
   const qMap = new Map(questionsRes.rows.map((q) => [q.id, q]));
 
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     await client.query(`
@@ -683,7 +726,7 @@ app.get('/api/quizzes/:id/submissions', auth, requireRole('teacher'), wrap(async
   const result = [];
   for (const s of subsRes.rows) {
     const ansRes = await pool.query(`
-      SELECT qa.*, q.seq, q.description, q.type, q.options, q.answer_key
+      SELECT qa.*, q.seq, q.description, q.type, q.options, q.answer_key, q.explanation
       FROM question_answers qa JOIN questions q ON q.id = qa.question_id
       WHERE qa.quiz_submission_id = $1
       ORDER BY q.seq
@@ -702,6 +745,7 @@ app.get('/api/quizzes/:id/submissions', auth, requireRole('teacher'), wrap(async
         type: a.type,
         options: parse(a.options, []),
         answerKey: parse(a.answer_key, ''),
+        explanation: a.explanation || '',
         content: parse(a.content, ''),
         score: a.score,
         feedback: a.feedback,
@@ -725,7 +769,7 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
   const { answers } = req.body || {};
   if (!Array.isArray(answers)) return res.status(400).json({ error: '缺少評分資料' });
 
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query('BEGIN');
     for (const a of answers) {
@@ -765,7 +809,7 @@ app.get('/api/quizzes/:id/my-submission', auth, requireRole('student'), wrap(asy
   const sub = subRes.rows[0];
   if (!sub) return res.status(404).json({ error: '尚未作答' });
   const ansRes = await pool.query(`
-    SELECT qa.*, q.seq, q.description, q.type, q.options
+    SELECT qa.*, q.seq, q.description, q.type, q.options, q.answer_key, q.explanation
     FROM question_answers qa JOIN questions q ON q.id = qa.question_id
     WHERE qa.quiz_submission_id = $1
     ORDER BY q.seq
@@ -773,12 +817,15 @@ app.get('/api/quizzes/:id/my-submission', auth, requireRole('student'), wrap(asy
   res.json({
     status: sub.status,
     submittedAt: sub.submitted_at,
+    // 這個 API 只有在學生已經交卷後才能查，這時候讓他們直接看到正確答案跟詳細解釋沒問題
     answers: ansRes.rows.map((a) => ({
       questionId: a.question_id,
       seq: a.seq,
       description: a.description,
       type: a.type,
       options: parse(a.options, []),
+      answerKey: parse(a.answer_key, ''),
+      explanation: a.explanation || '',
       content: parse(a.content, ''),
       score: a.score,
       feedback: a.feedback,

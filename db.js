@@ -73,7 +73,9 @@ async function init() {
       description TEXT NOT NULL DEFAULT '',
       type        TEXT NOT NULL CHECK (type IN ('single', 'multiple', 'short')),
       options     TEXT NOT NULL DEFAULT '[]',
-      answer_key  TEXT NOT NULL DEFAULT ''
+      answer_key  TEXT NOT NULL DEFAULT '',
+      -- 簡答題用：老師設的標準答案關鍵字（用來自動比對評分，選填）
+      explanation TEXT NOT NULL DEFAULT ''  -- 該題詳細解釋，批改完會顯示給學生參考（各題型皆可選填）
     );
 
     CREATE TABLE IF NOT EXISTS quiz_submissions (
@@ -97,6 +99,9 @@ async function init() {
       UNIQUE (quiz_submission_id, question_id)
     );
   `);
+
+  // 既有的 questions 表補上 explanation 欄位（Postgres 支援 IF NOT EXISTS，直接加即可）
+  await pool.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS explanation TEXT NOT NULL DEFAULT ''`);
 }
 
 module.exports = { pool, init };

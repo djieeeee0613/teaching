@@ -282,7 +282,10 @@ function TeacherHome({ user, onEnterCourse, onEnterManage }) {
 }
 
 // ---- 測驗編輯器：標題在最上面，底下第 1 題、第 2 題……全部編輯完一次儲存 ----
-const blankQuestion = () => ({ description: '', type: 'single', options: ['', ''], answerSingle: 0, answerMulti: [] });
+const blankQuestion = () => ({
+  description: '', type: 'single', options: ['', ''],
+  answerSingle: 0, answerMulti: [], answerText: '', explanation: '',
+});
 
 function QuestionEditor({ q, index, onChange, onRemove, removable }) {
   const isChoice = q.type !== 'short';
@@ -296,7 +299,9 @@ function QuestionEditor({ q, index, onChange, onRemove, removable }) {
       </div>
       <label>題目說明<textarea rows="2" value={q.description} onChange={(e) => update({ description: e.target.value })} /></label>
       <label>題型</label>
-      <select value={q.type} onChange={(e) => update({ type: e.target.value, options: ['', ''], answerSingle: 0, answerMulti: [] })}>
+      <select value={q.type} onChange={(e) => update({
+        type: e.target.value, options: ['', ''], answerSingle: 0, answerMulti: [], answerText: '',
+      })}>
         <option value="single">單選題</option>
         <option value="multiple">多選題</option>
         <option value="short">簡答題</option>
@@ -331,6 +336,20 @@ function QuestionEditor({ q, index, onChange, onRemove, removable }) {
           </div>
         </>
       )}
+
+      {q.type === 'short' && (
+        <>
+          <label>標準答案關鍵字（選填）</label>
+          <textarea rows="2" value={q.answerText} placeholder="用逗號分開，例如：光合作用,葉綠素,二氧化碳"
+            onChange={(e) => update({ answerText: e.target.value })} />
+          <p className="muted" style={{ marginTop: 4 }}>
+            學生作答只要包含其中一個關鍵字，系統就會自動給 100 分；沒對到的話留給你人工批改，不會自動判 0 分。
+          </p>
+        </>
+      )}
+      <label>詳細解釋（選填，批改完會顯示給學生參考）</label>
+      <textarea rows="2" value={q.explanation} placeholder="說明為什麼這樣答、補充概念等"
+        onChange={(e) => update({ explanation: e.target.value })} />
     </div>
   );
 }
@@ -344,6 +363,8 @@ function questionToEditorState(apiQ) {
     options: apiQ.type === 'short' ? ['', ''] : (apiQ.options.length ? apiQ.options : ['', '']),
     answerSingle: apiQ.type === 'single' ? apiQ.answerKey : 0,
     answerMulti: apiQ.type === 'multiple' ? apiQ.answerKey : [],
+    answerText: apiQ.type === 'short' ? (apiQ.answerKey || '') : '',
+    explanation: apiQ.explanation || '',
   };
 }
 
@@ -392,7 +413,8 @@ function QuizBuilder({ classId, existingQuiz, onSaved, onCancelEdit }) {
           description: q.description,
           type: q.type,
           options: q.type === 'short' ? [] : q.options.map((s) => s.trim()).filter(Boolean),
-          answerKey: q.type === 'short' ? '' : (q.type === 'single' ? q.answerSingle : q.answerMulti),
+          answerKey: q.type === 'short' ? q.answerText.trim() : (q.type === 'single' ? q.answerSingle : q.answerMulti),
+          explanation: q.explanation.trim(),
         })),
       };
       if (isEdit) {
@@ -464,15 +486,30 @@ function AnswerCell({ a }) {
   return <span>{(a.content || []).map((i) => a.options[i]).join('、') || '（未作答）'}</span>;
 }
 
+// 顯示正確答案／標準答案關鍵字，以及老師寫的詳細解釋（老師批改頁、學生查看回饋頁共用）
 function CorrectAnswerHint({ a }) {
-  if (a.type === 'short') return null;
+  if (a.type === 'short') {
+    if (!a.answerKey && !a.explanation) return null;
+    return (
+      <>
+        {a.answerKey && <div className="muted">標準答案關鍵字：{a.answerKey}</div>}
+        {a.explanation && <div className="muted">詳細解釋：{a.explanation}</div>}
+      </>
+    );
+  }
   const text = a.type === 'single'
     ? a.options[a.answerKey]
     : (a.answerKey || []).map((i) => a.options[i]).join('、');
-  return <div className="muted">正確答案：{text}</div>;
+  return (
+    <>
+      <div className="muted">正確答案：{text}</div>
+      {a.explanation && <div className="muted">詳細解釋：{a.explanation}</div>}
+    </>
+  );
 }
 
-// 測驗個別總覽：交卷/批改進度、平均分、每題答對率（客觀題）
+// 測驗個別總覽：交卷/批改進度、平均分，以及每題的詳細統計
+// （多選題現在是按比例給分，不是非 0 即 100，所以改成看「平均得分」跟全對/部分對/全錯的比例）
 function QuizOverview({ subs }) {
   const total = subs.length;
   const gradedSubs = subs.filter((s) => s.status === 'graded');
@@ -487,11 +524,16 @@ function QuizOverview({ subs }) {
   const questionStats = {};
   subs.forEach((s) => {
     s.answers.forEach((a) => {
-      if (a.type === 'short') return;
-      if (!questionStats[a.seq]) questionStats[a.seq] = { correct: 0, graded: 0 };
-      if (a.status === 'graded') {
-        questionStats[a.seq].graded += 1;
-        if (a.score === 100) questionStats[a.seq].correct += 1;
+      if (!questionStats[a.seq]) {
+        questionStats[a.seq] = { type: a.type, description: a.description, graded: 0, full: 0, partial: 0, zero: 0, scoreSum: 0 };
+      }
+      const st = questionStats[a.seq];
+      if (a.status === 'graded' && a.score != null) {
+        st.graded += 1;
+        st.scoreSum += a.score;
+        if (a.score >= 100) st.full += 1;
+        else if (a.score <= 0) st.zero += 1;
+        else st.partial += 1;
       }
     });
   });
@@ -507,12 +549,26 @@ function QuizOverview({ subs }) {
         {overallAvg != null && <span className="tag pre">平均 {overallAvg} 分</span>}
       </div>
       {questionEntries.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          {questionEntries.map(([seq, s]) => (
-            <div key={seq} className="muted" style={{ marginTop: 4 }}>
-              第 {seq} 題：{s.graded > 0 ? Math.round((s.correct / s.graded) * 100) + '% 答對' : '尚無已批改的作答'}
-            </div>
-          ))}
+        <div style={{ marginTop: 14 }}>
+          {questionEntries.map(([seq, s]) => {
+            const avg = s.graded > 0 ? Math.round((s.scoreSum / s.graded) * 10) / 10 : null;
+            return (
+              <div key={seq} style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10 }}>
+                <div className="row" style={{ justifyContent: 'space-between' }}>
+                  <strong>第 {seq} 題 · {TYPE_LABEL[s.type]}</strong>
+                  {avg != null && <span className="tag pre">平均 {avg} 分</span>}
+                </div>
+                {s.graded === 0 && <p className="muted" style={{ margin: '4px 0 0' }}>尚無已批改的作答</p>}
+                {s.graded > 0 && (
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <span className="tag ok">{Math.round((s.full / s.graded) * 100)}% 全對</span>
+                    {s.partial > 0 && <span className="tag wait">{Math.round((s.partial / s.graded) * 100)}% 部分對</span>}
+                    <span className="tag">{Math.round((s.zero / s.graded) * 100)}% 全錯</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -541,8 +597,14 @@ function StudentSubmissionCard({ sub, onGraded }) {
     sub.answers.map((a) => [a.answerId, { score: a.score ?? '', feedback: a.feedback ?? '' }])
   ));
   const [busy, setBusy] = useState(false);
+  const [collapsed, setCollapsed] = useState(false); // 收起這位學生，方便一次檢視很多人時捲動
 
   const setGrade = (answerId, patch) => setGrades((g) => ({ ...g, [answerId]: { ...g[answerId], ...patch } }));
+
+  const scoredAnswers = sub.answers.map((a) => a.score).filter((x) => x != null);
+  const avgScore = scoredAnswers.length
+    ? Math.round((scoredAnswers.reduce((a, b) => a + b, 0) / scoredAnswers.length) * 10) / 10
+    : null;
 
   const saveAll = async () => {
     setBusy(true);
@@ -558,19 +620,28 @@ function StudentSubmissionCard({ sub, onGraded }) {
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between' }}>
-        <strong>{sub.studentName}</strong>
-        <span className={'tag ' + (sub.status === 'graded' ? 'ok' : 'wait')}>
-          {sub.status === 'graded' ? '已批改完成' : '待批改'}
+        <span className="row" style={{ cursor: 'pointer' }} onClick={() => setCollapsed((c) => !c)}>
+          <span className="muted">{collapsed ? '▶' : '▼'}</span>
+          <strong>{sub.studentName}</strong>
+        </span>
+        <span className="row">
+          {avgScore != null && <span className="tag pre">平均 {avgScore} 分</span>}
+          <span className={'tag ' + (sub.status === 'graded' ? 'ok' : 'wait')}>
+            {sub.status === 'graded' ? '已批改完成' : '待批改'}
+          </span>
+          <button type="button" className="ghost" onClick={() => setCollapsed((c) => !c)}>
+            {collapsed ? '展開' : '收合'}
+          </button>
         </span>
       </div>
       <div className="muted">{sub.studentEmail} · 交卷 {sub.submittedAt}</div>
 
-      {sub.answers.map((a) => (
+      {collapsed ? null : sub.answers.map((a) => (
         <div key={a.answerId} style={{ borderTop: '1px solid var(--border)', marginTop: 12, paddingTop: 12 }}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <strong>第 {a.seq} 題 · {TYPE_LABEL[a.type]}</strong>
             {a.status === 'graded' && a.type !== 'short' && (
-              <span className={'tag ' + (a.score === 100 ? 'ok' : '')}>{a.score} 分（自動批改）</span>
+              <span className={'tag ' + (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '')}>{a.score} 分（自動批改）</span>
             )}
           </div>
           <p style={{ whiteSpace: 'pre-wrap', margin: '6px 0' }}>{a.description}</p>
@@ -590,9 +661,11 @@ function StudentSubmissionCard({ sub, onGraded }) {
           </div>
         </div>
       ))}
-      <div style={{ marginTop: 12 }}>
-        <button disabled={busy} onClick={saveAll}>儲存批改</button>
-      </div>
+      {!collapsed && (
+        <div style={{ marginTop: 12 }}>
+          <button disabled={busy} onClick={saveAll}>儲存批改</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -946,6 +1019,7 @@ function QuizResult({ quizSummary }) {
             </span>
           </div>
           <p style={{ whiteSpace: 'pre-wrap' }}>{a.description}</p>
+          <CorrectAnswerHint a={a} />
           <p>你的作答：<AnswerCell a={a} /></p>
           {a.status === 'graded' && a.feedback && <p><strong>老師回饋：</strong>{a.feedback}</p>}
           {a.status === 'graded' && !a.feedback && <p className="muted">老師沒有留下文字回饋。</p>}
