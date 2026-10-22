@@ -854,6 +854,55 @@ app.get('/api/demo', (req, res) => {
   res.json({ enabled: true, password: DEMO.password, teacher: DEMO.teacher, student: DEMO.student });
 });
 
+// 把一批測驗（含題目）寫進某門課；quiz.questions[] 的格式跟示範課程一致
+async function insertDemoQuizzes(client, classId, teacherId, quizzes) {
+  for (const q of quizzes) {
+    const quizId = (await client.query(
+      'INSERT INTO quizzes (class_id, teacher_id, title, kind) VALUES ($1, $2, $3, $4) RETURNING id',
+      [classId, teacherId, q.title, q.kind || 'normal']
+    )).rows[0].id;
+    for (let i = 0; i < q.questions.length; i++) {
+      const x = q.questions[i];
+      await client.query(
+        `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key, explanation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [quizId, i + 1, x.description, x.type, JSON.stringify(x.options || []), JSON.stringify(x.answerKey ?? ''), x.explanation || '']
+      );
+    }
+  }
+}
+
+// 第二門示範課程：「公民與社會題庫」——40 題，依 6 個章節各一份測驗（資料在 demo_quiz_bank.json）
+const DEMO_BANK_CLASS = '📚 公民與社會題庫（40 題）';
+async function ensureBankClass(teacher, student) {
+  let quizzes;
+  try { quizzes = require('./demo_quiz_bank.json'); } catch { return; }
+  let cls = (await pool.query(
+    'SELECT * FROM classes WHERE teacher_id = $1 AND name = $2', [teacher.id, DEMO_BANK_CLASS]
+  )).rows[0];
+  if (!cls) {
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+      const joinCode = await generateJoinCode();
+      cls = (await client.query(
+        'INSERT INTO classes (teacher_id, name, join_code) VALUES ($1, $2, $3) RETURNING *',
+        [teacher.id, DEMO_BANK_CLASS, joinCode]
+      )).rows[0];
+      await insertDemoQuizzes(client, cls.id, teacher.id, quizzes);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+  await pool.query(
+    'INSERT INTO enrollments (class_id, student_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [cls.id, student.id]
+  );
+}
+
 // 啟動時確保試玩帳號、示範課程、示範測驗都在（刪掉了下次啟動會補回來；已存在就不動）
 async function ensureDemoData() {
   if (!demoEnabled()) return;
@@ -897,20 +946,7 @@ async function ensureDemoData() {
           { description: '水結成冰是幾度？', type: 'single', options: ['0 度', '100 度', '50 度'], answerKey: 0, explanation: '水在 0 度會結冰、100 度會沸騰。' },
         ] },
       ];
-      for (const q of quizzes) {
-        const quizId = (await client.query(
-          'INSERT INTO quizzes (class_id, teacher_id, title, kind) VALUES ($1, $2, $3, $4) RETURNING id',
-          [cls.id, teacher.id, q.title, q.kind]
-        )).rows[0].id;
-        for (let i = 0; i < q.questions.length; i++) {
-          const x = q.questions[i];
-          await client.query(
-            `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key, explanation)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [quizId, i + 1, x.description, x.type, JSON.stringify(x.options || []), JSON.stringify(x.answerKey ?? ''), x.explanation || '']
-          );
-        }
-      }
+      await insertDemoQuizzes(client, cls.id, teacher.id, quizzes);
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
@@ -922,6 +958,7 @@ async function ensureDemoData() {
   await pool.query(
     'INSERT INTO enrollments (class_id, student_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [cls.id, student.id]
   );
+  await ensureBankClass(teacher, student);
 }
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
