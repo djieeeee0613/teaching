@@ -4,6 +4,7 @@ const path = require('node:path');
 const express = require('express');
 const { pool, init } = require('./db');
 const { hashPassword, verifyPassword, signToken, verifyToken } = require('./auth');
+const ai = require('./ai');
 
 const app = express();
 app.use(express.json());
@@ -671,6 +672,7 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
   const questionsRes = await pool.query('SELECT * FROM questions WHERE quiz_id = $1', [z.id]);
   const qMap = new Map(questionsRes.rows.map((q) => [q.id, q]));
 
+  let subId;
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -683,7 +685,7 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
     const subRes = await client.query(
       'SELECT id FROM quiz_submissions WHERE quiz_id = $1 AND student_id = $2', [z.id, req.user.id]
     );
-    const subId = subRes.rows[0].id;
+    subId = subRes.rows[0].id;
 
     let allGraded = true;
     for (const a of answers) {
@@ -695,7 +697,7 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
         INSERT INTO question_answers (quiz_submission_id, question_id, content, score, status)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (quiz_submission_id, question_id) DO UPDATE SET
-          content = $3, score = $4, status = $5, feedback = ''
+          content = $3, score = $4, status = $5, feedback = '', ai_feedback = '', ai_status = ''
       `, [subId, q.id, JSON.stringify(a.content ?? ''), score, score === null ? 'submitted' : 'graded']);
     }
     if (allGraded) {
@@ -712,6 +714,82 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
   } finally {
     client.release();
   }
+  // 回應已送出，AI 回饋在背景產生；失敗只記 log，不影響學生交卷
+  startAiFeedback(subId, req.user).catch((e) => console.error('AI 回饋啟動失敗：', e.message));
+}));
+
+// ---------- AI 小老師 ----------
+const DEMO_STUDENT_EMAIL = 'demo.student@demo.com';
+const AI_CONCURRENCY = 3;
+
+// 把這份作答裡「還沒有 AI 回饋」的題目標成 pending（或 off / limit），然後在背景逐題產生。
+async function startAiFeedback(subId, user) {
+  if (!ai.aiEnabled()) return;
+  const isDemo = user.email === DEMO_STUDENT_EMAIL;
+  if (isDemo && !ai.demoAllowed()) {
+    await pool.query(`UPDATE question_answers SET ai_status = 'off' WHERE quiz_submission_id = $1 AND ai_status IN ('', 'failed', 'limit')`, [subId]);
+    return;
+  }
+  const usedRes = await pool.query(`
+    SELECT COUNT(*) AS n FROM question_answers qa JOIN quiz_submissions s ON s.id = qa.quiz_submission_id
+    WHERE s.student_id = $1 AND qa.ai_at >= to_char(now(), 'YYYY-MM-DD')
+  `, [user.id]);
+  let remaining = Math.max(0, ai.dailyLimit() - Number(usedRes.rows[0].n));
+  const todo = await pool.query(
+    `SELECT id FROM question_answers WHERE quiz_submission_id = $1 AND ai_status IN ('', 'failed', 'limit') ORDER BY id`, [subId]
+  );
+  const ids = [];
+  for (const r of todo.rows) {
+    if (remaining > 0) {
+      ids.push(r.id); remaining -= 1;
+      await pool.query(`UPDATE question_answers SET ai_status = 'pending', ai_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = $1`, [r.id]);
+    } else {
+      await pool.query(`UPDATE question_answers SET ai_status = 'limit' WHERE id = $1`, [r.id]);
+    }
+  }
+  // 不 await：讓呼叫端可以立刻結束；內部自己處理錯誤
+  runAiQueue(ids).catch((e) => console.error('AI 回饋執行失敗：', e.message));
+}
+
+async function runAiQueue(ids) {
+  const queue = [...ids];
+  const worker = async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      await generateOne(id);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(AI_CONCURRENCY, queue.length) }, worker));
+}
+
+async function generateOne(answerId) {
+  const { rows } = await pool.query(`
+    SELECT qa.id, qa.content, qa.score, q.description, q.type, q.options, q.answer_key, q.explanation
+    FROM question_answers qa JOIN questions q ON q.id = qa.question_id
+    WHERE qa.id = $1 AND qa.ai_status = 'pending'
+  `, [answerId]);
+  const row = rows[0];
+  if (!row) return;
+  let text = '', status = 'done';
+  try {
+    text = await ai.callClaude(ai.buildUserMessage(row, parse));
+  } catch (e) {
+    console.error(`AI 回饋失敗（answer ${answerId}）：`, e.message);
+    status = 'failed';
+  }
+  // 條件包含 content：學生若在這段時間內重新作答，舊的結果不會蓋掉新的
+  await pool.query(
+    `UPDATE question_answers SET ai_feedback = $1, ai_status = $2 WHERE id = $3 AND ai_status = 'pending' AND content = $4`,
+    [text, status, answerId, row.content]
+  );
+}
+
+// 學生按「重新產生」：只處理失敗或超過上限而沒產生的題目
+app.post('/api/quizzes/:id/ai-retry', auth, requireRole('student'), wrap(async (req, res) => {
+  const subRes = await pool.query('SELECT id FROM quiz_submissions WHERE quiz_id = $1 AND student_id = $2', [req.params.id, req.user.id]);
+  if (!subRes.rows[0]) return res.status(404).json({ error: '尚未作答' });
+  await startAiFeedback(subRes.rows[0].id, req.user);
+  res.json({ ok: true });
 }));
 
 // 教師看某測驗所有學生的作答（用於批改）
@@ -753,6 +831,8 @@ app.get('/api/quizzes/:id/submissions', auth, requireRole('teacher'), wrap(async
         score: a.score,
         feedback: a.feedback,
         status: a.status,
+        aiFeedback: a.ai_feedback || '',
+        aiStatus: a.ai_status || '',
       })),
     });
   }
@@ -833,6 +913,8 @@ app.get('/api/quizzes/:id/my-submission', auth, requireRole('student'), wrap(asy
       score: a.score,
       feedback: a.feedback,
       status: a.status,
+      aiFeedback: a.ai_feedback || '',
+      aiStatus: a.ai_status || '',
     })),
   });
 }));

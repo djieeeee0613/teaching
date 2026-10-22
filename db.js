@@ -102,6 +102,11 @@ async function init() {
 
   // 既有的 questions 表補上 explanation 欄位（Postgres 支援 IF NOT EXISTS，直接加即可）
   await pool.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS explanation TEXT NOT NULL DEFAULT ''`);
+
+  // AI 小老師的回饋：ai_status 為 ''（沒有 AI）/ pending（產生中）/ done / failed / limit（超過每日上限）/ off（示範帳號不啟用）
+  await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_feedback TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_status TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_at TEXT`);
 }
 
 module.exports = { pool, init };

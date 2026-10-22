@@ -777,6 +777,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
           <p style={{ whiteSpace: 'pre-wrap', margin: '6px 0' }}>{a.description}</p>
           <CorrectAnswerHint a={a} />
           <p>學生作答：<AnswerCell a={a} /></p>
+          <AiNote a={a} />
           <div className="row">
             <div style={{ width: 90 }}>
               <label style={{ marginTop: 0 }}>分數</label>
@@ -1159,9 +1160,50 @@ function QuizTaker({ quizSummary, onDone }) {
   );
 }
 
-function QuizResult({ quizSummary }) {
+// AI 小老師的回饋區塊（學生端、老師端共用）。老師端不傳 onRetry。
+function AiNote({ a, onRetry }) {
+  if (a.aiStatus === 'pending') {
+    return <p className="ai-note"><span className="spinner" /> AI 小老師正在看你的答案…</p>;
+  }
+  if (a.aiStatus === 'done' && a.aiFeedback) {
+    return (
+      <p className="ai-note">
+        <strong>AI 小老師：</strong>{a.aiFeedback}
+        <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 4 }}>AI 的建議僅供參考，可能出錯，請以老師的說明為準。</span>
+      </p>
+    );
+  }
+  if (a.aiStatus === 'failed' || a.aiStatus === 'limit') {
+    return (
+      <p className="muted">
+        {a.aiStatus === 'limit' ? '今天的 AI 回饋次數用完了，明天再來看看。' : 'AI 小老師這次沒有成功回覆。'}
+        {onRetry && <> <button className="ghost" onClick={onRetry}>重新產生</button></>}
+      </p>
+    );
+  }
+  return null;
+}
+
+function QuizResult({ quizSummary, onRetake }) {
   const [detail, setDetail] = useState(null);
   useEffect(() => { api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail); }, [quizSummary.id]);
+
+  // AI 回饋在背景產生：還有 pending 的題目就每 3 秒更新一次（最多約 90 秒）
+  const hasPending = detail && detail.answers.some((a) => a.aiStatus === 'pending');
+  useEffect(() => {
+    if (!hasPending) return undefined;
+    let tries = 0;
+    const t = setInterval(() => {
+      tries += 1;
+      api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail);
+      if (tries >= 30) clearInterval(t);
+    }, 3000);
+    return () => clearInterval(t);
+  }, [hasPending, quizSummary.id]);
+  const aiRetry = async () => {
+    await api('/quizzes/' + quizSummary.id + '/ai-retry', { method: 'POST' });
+    setDetail(await api('/quizzes/' + quizSummary.id + '/my-submission'));
+  };
 
   const graded = quizSummary.myStatus === 'graded';
   const score = quizSummary.myScore;
@@ -1194,6 +1236,9 @@ function QuizResult({ quizSummary }) {
           : <span className="mascot big">⏳</span>}
       </div>
 
+      {onRetake && (
+        <div style={{ marginTop: 14 }}><button className="ghost" onClick={onRetake}>重新作答這份測驗</button></div>
+      )}
       {!detail && <div className="loading"><span className="spinner" /> 載入中…</div>}
       {detail && detail.answers.map((a, i) => (
         <div key={a.questionId} className="card q-card" style={{ animationDelay: i * 70 + 'ms' }}>
@@ -1208,6 +1253,7 @@ function QuizResult({ quizSummary }) {
           <p>你的作答：<AnswerCell a={a} /></p>
           {a.status === 'graded' && a.feedback && <p className="teacher-note"><strong>老師回饋：</strong>{a.feedback}</p>}
           {a.status === 'graded' && !a.feedback && <p className="muted">老師沒有留下文字回饋。</p>}
+          <AiNote a={a} onRetry={aiRetry} />
         </div>
       ))}
     </>
@@ -1253,6 +1299,16 @@ function StudentCourse({ cls, onBack }) {
     (statusFilter === 'all' || (statusFilter === 'todo' ? !z.myStatus : !!z.myStatus)) &&
     (kindFilter === 'all' || z.kind === kindFilter));
 
+  // 重新作答：新的作答會整份覆蓋上一次（包含老師已給的分數與回饋），所以先讓學生確認
+  const retake = (z) => {
+    const ok = window.confirm(
+      `要重新作答「${z.title}」嗎？
+
+送出後會覆蓋你目前的成績，老師已經給的回饋也會被清掉。`
+    );
+    if (ok) { setViewing(null); setTaking(z); }
+  };
+
   if (taking) {
     return (
       <div className="wrap">
@@ -1273,7 +1329,7 @@ function StudentCourse({ cls, onBack }) {
     return (
       <div className="wrap">
         <button className="ghost" onClick={() => setViewing(null)}>← 回到地圖</button>
-        <QuizResult quizSummary={viewing} />
+        <QuizResult quizSummary={viewing} onRetake={() => retake(viewing)} />
       </div>
     );
   }
@@ -1344,7 +1400,12 @@ function StudentCourse({ cls, onBack }) {
                   {state === 'done' ? <Stars n={starsForScore(z.myScore)} /> : <span />}
                   {state === 'todo'
                     ? <button onClick={() => setTaking(z)}>🚩 開始闖關</button>
-                    : <button className="ghost" onClick={() => setViewing(z)}>{state === 'done' ? '看成績與解答' : '看我的答案'}</button>}
+                    : (
+                      <span className="row">
+                        <button className="ghost" onClick={() => setViewing(z)}>{state === 'done' ? '看成績與解答' : '看我的答案'}</button>
+                        <button className="ghost" onClick={() => retake(z)}>重新作答</button>
+                      </span>
+                    )}
                 </div>
               </div>
             </div>
