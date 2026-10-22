@@ -747,6 +747,16 @@ function StudentSubmissionCard({ sub, onGraded }) {
     } finally { setBusy(false); }
   };
 
+  const resetSub = async () => {
+    const ok = window.confirm(`要重置「${sub.studentName}」的這份作答嗎？\n\n他的作答內容、分數、老師回饋和 AI 回饋都會被刪除，無法復原。重置後他可以重新作答。`);
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api('/quiz-submissions/' + sub.id, { method: 'DELETE' });
+      onGraded();
+    } finally { setBusy(false); }
+  };
+
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -762,6 +772,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
           <button type="button" className="ghost" onClick={() => setCollapsed((c) => !c)}>
             {collapsed ? '展開' : '收合'}
           </button>
+          <button type="button" className="ghost" disabled={busy} onClick={resetSub}>重置作答</button>
         </span>
       </div>
       <div className="muted">{sub.studentEmail} · 交卷 {sub.submittedAt}</div>

@@ -881,6 +881,31 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
   res.json({ ok: true });
 }));
 
+// 教師重置某位學生的某份作答：刪掉作答明細（含分數、老師回饋、AI 回饋）與交卷紀錄，學生回到「未作答」
+app.delete('/api/quiz-submissions/:id', auth, requireRole('teacher'), wrap(async (req, res) => {
+  const subRes = await pool.query(`
+    SELECT s.id, z.teacher_id FROM quiz_submissions s
+    JOIN quizzes z ON z.id = s.quiz_id
+    WHERE s.id = $1
+  `, [req.params.id]);
+  const sub = subRes.rows[0];
+  if (!sub || sub.teacher_id !== req.user.id) return res.status(403).json({ error: '權限不足' });
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM question_answers WHERE quiz_submission_id = $1', [sub.id]);
+    await client.query('DELETE FROM quiz_submissions WHERE id = $1', [sub.id]);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+  res.json({ ok: true });
+}));
+
 // 學生看自己某份測驗的作答明細與老師回饋
 app.get('/api/quizzes/:id/my-submission', auth, requireRole('student'), wrap(async (req, res) => {
   const zRes = await pool.query('SELECT * FROM quizzes WHERE id = $1', [req.params.id]);
