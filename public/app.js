@@ -46,7 +46,17 @@ function shuffled(arr) {
 
 // ---------- Auth screen ----------
 // 第一步先選身份（老師/學生），選完才進登入／註冊表單，表單裡就不用再選一次。
-function RolePicker({ onPick }) {
+function DemoHint({ acc, pw }) {
+  return (
+    <div className="demo-mini" onClick={(e) => e.stopPropagation()}>
+      <div>🎮 試玩帳號</div>
+      <code>{acc.email}</code>
+      <code>{pw}</code>
+    </div>
+  );
+}
+
+function RolePicker({ onPick, demo }) {
   return (
     <div className="wrap" style={{ maxWidth: 480 }}>
       <h1>教學練習平台</h1>
@@ -56,11 +66,13 @@ function RolePicker({ onPick }) {
           <div style={{ fontSize: 34 }}>🧑‍🏫</div>
           <h2 style={{ marginTop: 10 }}>我是老師</h2>
           <p className="muted">建立課程、出題、批改、點名</p>
+          {demo && demo.enabled && <DemoHint acc={demo.teacher} pw={demo.password} />}
         </div>
         <div className="card role-card" style={{ flex: 1, marginTop: 0 }} onClick={() => onPick('student')}>
           <div style={{ fontSize: 34 }}>🎓</div>
           <h2 style={{ marginTop: 10 }}>我是學生</h2>
           <p className="muted">加入課程、作答、看老師回饋</p>
+          {demo && demo.enabled && <DemoHint acc={demo.student} pw={demo.password} />}
         </div>
       </div>
     </div>
@@ -95,7 +107,7 @@ function AuthScreen({ onLogin }) {
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
 
-  if (!role) return <RolePicker onPick={setRole} />;
+  if (!role) return <RolePicker onPick={setRole} demo={demo} />;
 
   return (
     <div className="wrap" style={{ maxWidth: 420 }}>
