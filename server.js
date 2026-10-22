@@ -112,6 +112,7 @@ function shapeClass(c) {
     teacherName: c.teacher_name ?? undefined,
     studentCount: c.student_count != null ? Number(c.student_count) : undefined,
     quizCount: c.quiz_count != null ? Number(c.quiz_count) : undefined,
+    completedCount: c.completed_count != null ? Number(c.completed_count) : undefined,
   };
 }
 
@@ -264,7 +265,9 @@ app.get('/api/classes', auth, wrap(async (req, res) => {
   }
   const { rows } = await pool.query(`
     SELECT c.*, u.name AS teacher_name,
-      (SELECT COUNT(*) FROM quizzes z WHERE z.class_id = c.id) AS quiz_count
+      (SELECT COUNT(*) FROM quizzes z WHERE z.class_id = c.id) AS quiz_count,
+      (SELECT COUNT(*) FROM quiz_submissions s JOIN quizzes z ON z.id = s.quiz_id
+         WHERE z.class_id = c.id AND s.student_id = $1) AS completed_count
     FROM classes c
     JOIN enrollments e ON e.class_id = c.id AND e.student_id = $1
     JOIN users u ON u.id = c.teacher_id
@@ -834,6 +837,93 @@ app.get('/api/quizzes/:id/my-submission', auth, requireRole('student'), wrap(asy
   });
 }));
 
+// ---------- 試玩（demo）帳號 ----------
+// 登入／註冊頁會顯示這組公開的試玩帳密，讓人不用註冊就能體驗。
+// 這組帳號是「所有人共用、密碼公開」的，所以只放示範資料；正式上線若不想開放，
+// 在環境變數設 DEMO_ACCOUNTS=off 就會完全關閉（不建立帳號，登入頁也不顯示）。
+const DEMO = {
+  password: 'demo1234',
+  teacher: { email: 'demo.teacher@demo.com', name: '示範老師' },
+  student: { email: 'demo.student@demo.com', name: '示範同學' },
+  className: '🌟 示範課程：自然小學堂',
+};
+const demoEnabled = () => String(process.env.DEMO_ACCOUNTS || '').toLowerCase() !== 'off';
+
+app.get('/api/demo', (req, res) => {
+  if (!demoEnabled()) return res.json({ enabled: false });
+  res.json({ enabled: true, password: DEMO.password, teacher: DEMO.teacher, student: DEMO.student });
+});
+
+// 啟動時確保試玩帳號、示範課程、示範測驗都在（刪掉了下次啟動會補回來；已存在就不動）
+async function ensureDemoData() {
+  if (!demoEnabled()) return;
+  const ensureUser = async (u, role) => {
+    const found = await pool.query('SELECT * FROM users WHERE email = $1', [u.email]);
+    if (found.rows[0]) return found.rows[0];
+    const ins = await pool.query(
+      'INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, $4) RETURNING *',
+      [u.email, hashPassword(DEMO.password), u.name, role]
+    );
+    return ins.rows[0];
+  };
+  const teacher = await ensureUser(DEMO.teacher, 'teacher');
+  const student = await ensureUser(DEMO.student, 'student');
+  // 帳號若被別人佔用成其他身分就不要硬塞資料
+  if (teacher.role !== 'teacher' || student.role !== 'student') return;
+
+  let cls = (await pool.query(
+    'SELECT * FROM classes WHERE teacher_id = $1 AND name = $2', [teacher.id, DEMO.className]
+  )).rows[0];
+
+  if (!cls) {
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+      const joinCode = await generateJoinCode();
+      cls = (await client.query(
+        'INSERT INTO classes (teacher_id, name, join_code) VALUES ($1, $2, $3) RETURNING *',
+        [teacher.id, DEMO.className, joinCode]
+      )).rows[0];
+      const quizzes = [
+        { title: '課前小測驗：你知道多少？', kind: 'pretest', questions: [
+          { description: '植物是靠什麼製造養分的？', type: 'single', options: ['光合作用', '睡覺', '喝牛奶'], answerKey: 0, explanation: '植物利用陽光、水和二氧化碳製造養分，這叫光合作用。' },
+          { description: '下面哪些是植物？（可複選）', type: 'multiple', options: ['玫瑰', '石頭', '向日葵', '腳踏車'], answerKey: [0, 2], explanation: '玫瑰和向日葵是植物；石頭和腳踏車不是生物。' },
+        ] },
+        { title: '動物小觀察', kind: 'normal', questions: [
+          { description: '魚主要生活在哪裡？', type: 'single', options: ['水裡', '天空', '沙漠'], answerKey: 0, explanation: '魚用鰓呼吸，生活在水裡。' },
+          { description: '請寫出一種你知道的會飛的動物。', type: 'short', answerKey: '鳥,蝴蝶,蝙蝠,蜜蜂,蜻蜓', explanation: '小鳥、蝴蝶、蝙蝠、蜜蜂、蜻蜓都會飛喔！（寫到任何一個關鍵字系統會自動給分）' },
+        ] },
+        { title: '期末後測：我學會了！', kind: 'posttest', questions: [
+          { description: '水結成冰是幾度？', type: 'single', options: ['0 度', '100 度', '50 度'], answerKey: 0, explanation: '水在 0 度會結冰、100 度會沸騰。' },
+        ] },
+      ];
+      for (const q of quizzes) {
+        const quizId = (await client.query(
+          'INSERT INTO quizzes (class_id, teacher_id, title, kind) VALUES ($1, $2, $3, $4) RETURNING id',
+          [cls.id, teacher.id, q.title, q.kind]
+        )).rows[0].id;
+        for (let i = 0; i < q.questions.length; i++) {
+          const x = q.questions[i];
+          await client.query(
+            `INSERT INTO questions (quiz_id, seq, description, type, options, answer_key, explanation)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [quizId, i + 1, x.description, x.type, JSON.stringify(x.options || []), JSON.stringify(x.answerKey ?? ''), x.explanation || '']
+          );
+        }
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+  await pool.query(
+    'INSERT INTO enrollments (class_id, student_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [cls.id, student.id]
+  );
+}
+
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // 統一錯誤處理：任何 route 裡沒接住的例外（含資料庫錯誤）都回 JSON，
@@ -850,6 +940,12 @@ async function start() {
   } catch (e) {
     console.error('資料庫連線或初始化失敗：', e.message);
     process.exit(1);
+  }
+  try {
+    await ensureDemoData();
+  } catch (e) {
+    // 試玩資料建不起來不影響正式功能，記一筆就好，不要讓伺服器起不來
+    console.error('建立試玩帳號/示範資料失敗（不影響其他功能）：', e.message);
   }
   app.listen(PORT, () => console.log(`教學平台執行中： http://localhost:${PORT}`));
 }

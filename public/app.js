@@ -73,7 +73,15 @@ function AuthScreen({ onLogin }) {
   const [form, setForm] = useState({ email: '', password: '', name: '' });
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [demo, setDemo] = useState(null); // 後端提供的公開試玩帳密（DEMO_ACCOUNTS=off 時是 enabled:false）
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+  useEffect(() => { api('/demo').then(setDemo).catch(() => {}); }, []);
+  const demoAcc = demo && demo.enabled && role ? demo[role] : null;
+  const fillDemo = () => {
+    setMode('login'); setErr('');
+    setForm({ ...form, email: demoAcc.email, password: demo.password });
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -113,6 +121,18 @@ function AuthScreen({ onLogin }) {
           <button disabled={busy}>{mode === 'login' ? '登入' : '建立帳號'}</button>
         </div>
       </form>
+
+      {demoAcc && (
+        <div className="card demo-box">
+          <div className="demo-title">🎮 不想註冊？用試玩帳號直接體驗</div>
+          <div className="demo-row"><span>Email</span><code>{demoAcc.email}</code></div>
+          <div className="demo-row"><span>密碼</span><code>{demo.password}</code></div>
+          <button type="button" className="ghost" onClick={fillDemo}>一鍵填入並切換到登入</button>
+          <p className="muted" style={{ margin: '8px 0 0' }}>
+            這是所有人共用的示範帳號，裡面只有範例資料，請不要輸入個人資料。
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -175,26 +195,124 @@ function useWeather() {
   return weather;
 }
 
-function Dashboard({ user, stats }) {
+// ========================================================================
+// 共用的動畫小元件：數字跳動、進度環、進度條、星星、彩帶
+// ========================================================================
+
+// 數字從 0 跳到目標值（ease-out），整數就顯示整數，有小數就顯示一位小數
+function CountUp({ value, duration = 900 }) {
+  const target = Number(value) || 0;
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    if (target === 0) { setN(0); return; }
+    let raf, start;
+    const step = (t) => {
+      if (start === undefined) start = t;
+      const p = Math.min(1, (t - start) / duration);
+      setN(target * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return <>{Number.isInteger(target) ? Math.round(n) : n.toFixed(1)}</>;
+}
+
+// 進度環：掛載後才把 pct 填進去，這樣環會「畫」出來
+function Ring({ pct, size = 64, stroke = 7, color = '#fff', track = 'rgba(255,255,255,.3)', children }) {
+  const [p, setP] = useState(0);
+  useEffect(() => { const t = setTimeout(() => setP(pct), 120); return () => clearTimeout(t); }, [pct]);
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  return (
+    <div className="ring" style={{ width: size, height: size }}>
+      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={track} strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - Math.min(100, p) / 100)}
+          style={{ transition: 'stroke-dashoffset 1.1s cubic-bezier(.22,1,.36,1)' }} />
+      </svg>
+      <div className="ring-label">{children}</div>
+    </div>
+  );
+}
+
+function PBar({ pct }) {
+  const [w, setW] = useState(0);
+  useEffect(() => { const t = setTimeout(() => setW(pct), 120); return () => clearTimeout(t); }, [pct]);
+  return <div className="pbar"><i style={{ width: w + '%' }} /></div>;
+}
+
+// 分數換星星：90 以上 3 顆、60 以上 2 顆、有分數 1 顆
+const starsForScore = (s) => (s >= 90 ? 3 : s >= 60 ? 2 : s > 0 ? 1 : 0);
+
+function Stars({ n, total = 3, size = 20 }) {
+  return (
+    <span className="stars" style={{ fontSize: size }}>
+      {Array.from({ length: total }, (_, i) => (
+        <span key={i} className={i < n ? '' : 'off'} style={{ '--i': i }}>⭐</span>
+      ))}
+    </span>
+  );
+}
+
+const CONFETTI_COLORS = ['#ff5d8f', '#ffb648', '#3ed598', '#4facfe', '#a18cd1', '#ffd166'];
+function Confetti() {
+  const pieces = useMemo(() => Array.from({ length: 56 }, (_, i) => {
+    const w = 6 + Math.random() * 8;
+    return {
+      left: Math.random() * 100, dx: (Math.random() - 0.5) * 260, rot: Math.round(Math.random() * 720 - 360) + 'deg',
+      dur: 2.2 + Math.random() * 1.6, delay: Math.random() * 0.5, color: CONFETTI_COLORS[i % CONFETTI_COLORS.length], w,
+    };
+  }), []);
+  return (
+    <div className="confetti-wrap" aria-hidden="true">
+      {pieces.map((p, i) => (
+        <i key={i} style={{
+          left: p.left + '%', width: p.w, height: p.w * 1.6, background: p.color,
+          '--dx': p.dx + 'px', '--rot': p.rot, animationDuration: p.dur + 's', animationDelay: p.delay + 's',
+        }} />
+      ))}
+    </div>
+  );
+}
+
+// 每門課固定配一座「小島」的顏色跟圖示（用課程 id 取餘數，同一門課每次看到的都一樣）
+const ISLANDS = [
+  { emoji: '🏝️', bg: 'linear-gradient(135deg,#4facfe,#00c6fb)' },
+  { emoji: '🌋', bg: 'linear-gradient(135deg,#ff9a56,#ff5d8f)' },
+  { emoji: '🌳', bg: 'linear-gradient(135deg,#43e97b,#38c9a8)' },
+  { emoji: '🏰', bg: 'linear-gradient(135deg,#a18cd1,#e589c9)' },
+  { emoji: '🚀', bg: 'linear-gradient(135deg,#f6b73c,#ff8a5c)' },
+];
+const islandOf = (c) => ISLANDS[c.id % ISLANDS.length];
+
+function Dashboard({ user, stats, mission, mascot }) {
   const weather = useWeather();
   return (
-    <div className="card" style={{ background: 'var(--accent-grad)', color: '#fff', border: 'none' }}>
+    <div className="card hero">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'nowrap' }}>
         <div>
-          <h1 style={{ color: '#fff', marginTop: 0 }}>嗨，{user.name}！👋</h1>
+          <h1 style={{ color: '#fff', marginTop: 0 }}>
+            嗨，{user.name}！<span className="wave">👋</span>
+          </h1>
           <p style={{ opacity: .95, margin: 0 }}>{friendlyDate()}</p>
         </div>
-        {weather && (
-          <div style={{ fontSize: 26, fontWeight: 700, whiteSpace: 'nowrap' }}>
-            {weatherIcon(weather.code)} {weather.temp}°C
-          </div>
-        )}
+        <div className="row" style={{ flexWrap: 'nowrap', gap: 14 }}>
+          {weather && (
+            <div style={{ fontSize: 24, fontWeight: 700, whiteSpace: 'nowrap' }}>
+              {weatherIcon(weather.code)} {weather.temp}°C
+            </div>
+          )}
+          {mascot && <span className="mascot big">🦊</span>}
+        </div>
       </div>
+      {mission && <div className="mission">{mission}</div>}
       {stats && (
         <div className="row" style={{ marginTop: 14 }}>
           {stats.map((s, i) => (
-            <div key={i} style={{ background: 'rgba(255,255,255,.22)', borderRadius: 12, padding: '8px 16px' }}>
-              <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.2 }}>{s.value}</div>
+            <div key={i} className="stat-pill" style={{ animationDelay: (i * 90 + 200) + 'ms' }}>
+              <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.2 }}><CountUp value={s.value} /></div>
               <div style={{ fontSize: 12, opacity: .95 }}>{s.label}</div>
             </div>
           ))}
@@ -843,11 +961,12 @@ function TeacherApp({ user }) {
 }
 
 // ========================================================================
-// 學生端
+// 學生端：「學習冒險地圖」
+// 課程 = 一座小島（有進度環）；測驗 = 地圖上的一個關卡（待挑戰會發光、通關會拿星星）。
 // ========================================================================
 
 function StudentHome({ user, onEnterCourse }) {
-  const [classes, setClasses] = useState([]);
+  const [classes, setClasses] = useState(null);
   const [stats, setStats] = useState(null);
   const [code, setCode] = useState('');
   const [err, setErr] = useState('');
@@ -863,7 +982,7 @@ function StudentHome({ user, onEnterCourse }) {
     try {
       await api('/classes/join', { method: 'POST', body: { code } });
       setCode('');
-      load();
+      load(); api('/dashboard').then(setStats);
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
 
@@ -874,39 +993,62 @@ function StudentHome({ user, onEnterCourse }) {
     if (!ok) return;
     try {
       await api('/classes/' + c.id + '/leave', { method: 'DELETE' });
-      load();
+      load(); api('/dashboard').then(setStats);
     } catch (e) { setErr(e.message); }
   };
 
+  const mission = !stats ? null
+    : stats.classCount === 0 ? '🧭 先輸入老師給的代碼，加入你的第一座小島吧！'
+    : stats.pendingQuizCount > 0 ? `🚩 還有 ${stats.pendingQuizCount} 個關卡等你挑戰！`
+    : '🎉 目前的關卡都通關了，太厲害了！';
+
   return (
     <div className="wrap">
-      <Dashboard user={user} stats={stats && [
-        { label: '已加入課程', value: stats.classCount },
-        { label: '待完成測驗', value: stats.pendingQuizCount },
-        { label: '已完成測驗', value: stats.completedQuizCount },
+      <Dashboard user={user} mascot mission={mission} stats={stats && [
+        { label: '我的小島', value: stats.classCount },
+        { label: '待挑戰關卡', value: stats.pendingQuizCount },
+        { label: '已通關', value: stats.completedQuizCount },
       ]} />
-      <form className="card" onSubmit={join}>
-        <h2>加入課程</h2>
+
+      <h2 className="section-title">🗺️ 我的小島</h2>
+      {classes && classes.length === 0 && (
+        <div className="card empty">
+          <span className="mascot big">🦊</span>
+          <p>還沒有小島耶～跟老師拿 6 碼代碼，在下面輸入就能上島囉！</p>
+        </div>
+      )}
+      <div className="islands">
+        {(classes || []).map((c, i) => {
+          const isl = islandOf(c);
+          const pct = c.quizCount ? Math.round((c.completedCount / c.quizCount) * 100) : 0;
+          return (
+            <div key={c.id} className="island" style={{ '--island-bg': isl.bg, animationDelay: i * 90 + 'ms' }}
+              onClick={() => onEnterCourse(c)}>
+              <div className="island-top">
+                <span className="emoji">{isl.emoji}</span>
+                <Ring pct={pct} size={58} stroke={6}>{pct}%</Ring>
+              </div>
+              <h2>{c.name}</h2>
+              <div className="meta">{c.teacherName} 老師</div>
+              <div className="meta">已通關 {c.completedCount} / {c.quizCount} 關</div>
+              <div className="island-actions">
+                <span className="go">出發 →</span>
+                <button type="button" className="island-leave" onClick={(e) => { e.stopPropagation(); leaveClass(c); }}>退出</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <form className="card join" onSubmit={join}>
+        <h2>🧭 探索新小島</h2>
         <div className="row">
           <input style={{ flex: 1 }} placeholder="輸入老師給的 6 碼課程代碼" value={code}
             onChange={(e) => setCode(e.target.value.toUpperCase())} />
-          <button disabled={busy}>加入</button>
+          <button disabled={busy}>上島</button>
         </div>
         {err && <div className="err">{err}</div>}
       </form>
-
-      <h2 style={{ marginTop: 24 }}>我的課程</h2>
-      {classes.length === 0 && <p className="muted">還沒有加入任何課程，請跟老師拿加入代碼。</p>}
-      {classes.map((c) => (
-        <div className="card" key={c.id}>
-          <h2>{c.name}</h2>
-          <div className="muted">{c.teacherName} 老師 · {c.quizCount} 份測驗</div>
-          <div className="row" style={{ marginTop: 10 }}>
-            <button onClick={() => onEnterCourse(c)}>進入課程</button>
-            <button className="danger" onClick={() => leaveClass(c)}>退出課程</button>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
@@ -930,19 +1072,19 @@ function QuizTaker({ quizSummary, onDone }) {
     });
   }, [quizSummary.id]);
 
-  if (!order) return <p className="muted">載入題目中…</p>;
+  if (!order) return <div className="loading"><span className="spinner" /> 載入題目中…</div>;
 
   const setAnswer = (qid, content) => setAnswers((a) => ({ ...a, [qid]: content }));
+  const isAnswered = (q) => {
+    const a = answers[q.id];
+    return q.type === 'short' ? !!(a && String(a).trim()) : (a !== undefined && !(Array.isArray(a) && a.length === 0));
+  };
+  const answeredCount = order.filter(isAnswered).length;
+  const pct = Math.round((answeredCount / order.length) * 100);
 
   const submit = async () => {
     setErr('');
-    for (const q of order) {
-      const a = answers[q.id];
-      if (q.type === 'short' ? !a || !String(a).trim() : (a === undefined || (Array.isArray(a) && a.length === 0))) {
-        setErr('請完成所有題目再送出');
-        return;
-      }
-    }
+    if (answeredCount < order.length) { setErr('還有題目沒作答喔，全部寫完再交卷！'); return; }
     setBusy(true);
     try {
       const payload = { answers: order.map((q) => ({ questionId: q.id, content: answers[q.id] })) };
@@ -952,38 +1094,56 @@ function QuizTaker({ quizSummary, onDone }) {
   };
 
   return (
-    <div className="card">
-      <h1 style={{ marginTop: 0 }}>{quiz.title} <KindTag kind={quiz.kind} /></h1>
+    <>
+      <div className="quiz-progress">
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <strong>{quiz.title} <KindTag kind={quiz.kind} /></strong>
+          <span className="muted">已作答 {answeredCount} / {order.length} 題</span>
+        </div>
+        <div className="pbar live"><i style={{ width: pct + '%' }} /></div>
+      </div>
+
       {order.map((q, i) => (
-        <div key={q.id} style={{ borderTop: '1px solid var(--border)', marginTop: 14, paddingTop: 14 }}>
-          <strong>第 {i + 1} 題</strong>
-          <p style={{ whiteSpace: 'pre-wrap' }}>{q.description}</p>
-          {q.type === 'single' && q.displayOptions.map(({ text, idx }) => (
-            <div className="choice" key={idx}>
+        <div key={q.id} className={'card q-card' + (isAnswered(q) ? ' answered' : '')} style={{ animationDelay: i * 70 + 'ms' }}>
+          <div className="row">
+            <span className="q-badge">{i + 1}</span>
+            <span className="tag">{TYPE_LABEL[q.type]}</span>
+            {isAnswered(q) && <span className="q-check">✔</span>}
+          </div>
+          <p className="q-text">{q.description}</p>
+          {q.type === 'single' && q.displayOptions.map(({ text, idx }, k) => (
+            <label key={idx} className={'opt' + (answers[q.id] === idx ? ' selected' : '')}>
+              <b className="opt-key">{String.fromCharCode(65 + k)}</b>
               <input type="radio" name={'q' + q.id} checked={answers[q.id] === idx} onChange={() => setAnswer(q.id, idx)} />
               <span>{text}</span>
-            </div>
+            </label>
           ))}
-          {q.type === 'multiple' && q.displayOptions.map(({ text, idx }) => {
-            const cur = answers[q.id] || [];
-            return (
-              <div className="choice" key={idx}>
-                <input type="checkbox" checked={cur.includes(idx)}
-                  onChange={(e) => setAnswer(q.id, e.target.checked ? [...cur, idx] : cur.filter((x) => x !== idx))} />
-                <span>{text}</span>
-              </div>
-            );
-          })}
+          {q.type === 'multiple' && (
+            <>
+              <p className="muted" style={{ margin: '0 0 4px' }}>可以選很多個喔（選錯會扣分，小心！）</p>
+              {q.displayOptions.map(({ text, idx }, k) => {
+                const cur = answers[q.id] || [];
+                return (
+                  <label key={idx} className={'opt' + (cur.includes(idx) ? ' selected' : '')}>
+                    <b className="opt-key">{String.fromCharCode(65 + k)}</b>
+                    <input type="checkbox" checked={cur.includes(idx)}
+                      onChange={(e) => setAnswer(q.id, e.target.checked ? [...cur, idx] : cur.filter((x) => x !== idx))} />
+                    <span>{text}</span>
+                  </label>
+                );
+              })}
+            </>
+          )}
           {q.type === 'short' && (
-            <textarea rows="3" value={answers[q.id] || ''} onChange={(e) => setAnswer(q.id, e.target.value)} placeholder="輸入你的答案" />
+            <textarea rows="3" value={answers[q.id] || ''} onChange={(e) => setAnswer(q.id, e.target.value)} placeholder="把你的想法寫下來…" />
           )}
         </div>
       ))}
-      {err && <div className="err">{err}</div>}
-      <div style={{ marginTop: 16 }}>
-        <button disabled={busy} onClick={submit}>送出作答</button>
+      {err && <div className="err" key={err}>{err}</div>}
+      <div style={{ marginTop: 18 }}>
+        <button className="big-btn" disabled={busy} onClick={submit}>{busy ? '交卷中…' : '🚀 交卷！'}</button>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -991,41 +1151,54 @@ function QuizResult({ quizSummary }) {
   const [detail, setDetail] = useState(null);
   useEffect(() => { api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail); }, [quizSummary.id]);
 
+  const graded = quizSummary.myStatus === 'graded';
+  const score = quizSummary.myScore;
   const gradedAnswers = detail ? detail.answers.filter((a) => a.status === 'graded') : [];
   const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
   const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;
+  const msg = !graded ? '老師還在批改中，先來看看你的答案吧！'
+    : score >= 90 ? '太棒了！你真是小天才 🌟'
+    : score >= 60 ? '不錯喔，再接再厲 💪'
+    : '沒關係，看看解釋，下次一定更好 🌱';
+  const icon = (a) => (a.status !== 'graded' ? '⏳' : a.score >= 100 ? '✅' : a.score > 0 ? '🟡' : '❌');
 
   return (
-    <div className="card">
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <h1 style={{ marginTop: 0 }}>{quizSummary.title} <KindTag kind={quizSummary.kind} /></h1>
-        <span className={'tag ' + (quizSummary.myStatus === 'graded' ? 'ok' : 'wait')}>
-          {quizSummary.myStatus === 'graded' ? (quizSummary.myScore + ' 分') : '部分待批改'}
-        </span>
+    <>
+      {graded && score >= 90 && <Confetti />}
+      <div className="card hero score-hero">
+        <div>
+          <h1 style={{ color: '#fff', marginTop: 0 }}>{quizSummary.title} <KindTag kind={quizSummary.kind} /></h1>
+          <p style={{ margin: '4px 0 10px', opacity: .95 }}>{msg}</p>
+          {graded && <Stars n={starsForScore(score)} size={30} />}
+          {detail && (
+            <p style={{ margin: '10px 0 0', opacity: .95, fontSize: 13 }}>
+              共 {detail.answers.length} 題，已批改 {gradedAnswers.length} 題
+              {objectiveGraded > 0 && `，選擇題答對 ${correctCount}/${objectiveGraded} 題`}
+            </p>
+          )}
+        </div>
+        {graded
+          ? <Ring pct={score} size={104} stroke={10}><span className="big-score"><CountUp value={score} /></span></Ring>
+          : <span className="mascot big">⏳</span>}
       </div>
-      {detail && (
-        <p className="muted">
-          共 {detail.answers.length} 題，已批改 {gradedAnswers.length} 題
-          {objectiveGraded > 0 && `，選擇題答對 ${correctCount}/${objectiveGraded} 題`}
-        </p>
-      )}
-      {!detail && <p className="muted">載入中…</p>}
-      {detail && detail.answers.map((a) => (
-        <div key={a.questionId} style={{ borderTop: '1px solid var(--border)', marginTop: 12, paddingTop: 12 }}>
+
+      {!detail && <div className="loading"><span className="spinner" /> 載入中…</div>}
+      {detail && detail.answers.map((a, i) => (
+        <div key={a.questionId} className="card q-card" style={{ animationDelay: i * 70 + 'ms' }}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
-            <strong>第 {a.seq} 題</strong>
-            <span className={'tag ' + (a.status === 'graded' ? 'ok' : 'wait')}>
+            <span className="row"><span className="q-icon">{icon(a)}</span><strong>第 {a.seq} 題</strong></span>
+            <span className={'tag ' + (a.status === 'graded' ? (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '') : 'wait')}>
               {a.status === 'graded' ? (a.score + ' 分') : '待批改'}
             </span>
           </div>
-          <p style={{ whiteSpace: 'pre-wrap' }}>{a.description}</p>
+          <p className="q-text">{a.description}</p>
           <CorrectAnswerHint a={a} />
           <p>你的作答：<AnswerCell a={a} /></p>
-          {a.status === 'graded' && a.feedback && <p><strong>老師回饋：</strong>{a.feedback}</p>}
+          {a.status === 'graded' && a.feedback && <p className="teacher-note"><strong>老師回饋：</strong>{a.feedback}</p>}
           {a.status === 'graded' && !a.feedback && <p className="muted">老師沒有留下文字回饋。</p>}
         </div>
       ))}
-    </div>
+    </>
   );
 }
 
@@ -1035,31 +1208,50 @@ const KIND_FILTERS = [
   { value: 'pretest', label: '前測' },
   { value: 'posttest', label: '後測' },
 ];
+const STATUS_FILTERS = [
+  { value: 'all', label: '🗺️ 全部' },
+  { value: 'todo', label: '🚩 待挑戰' },
+  { value: 'done', label: '⭐ 已通關' },
+];
 
 function StudentCourse({ cls, onBack }) {
-  const [tab, setTab] = useState('todo');
+  const [statusFilter, setStatusFilter] = useState('all');
   const [kindFilter, setKindFilter] = useState('all');
-  const [list, setList] = useState([]);
+  const [list, setList] = useState(null);
   const [taking, setTaking] = useState(null);
   const [viewing, setViewing] = useState(null);
   const [flash, setFlash] = useState('');
+  const [confetti, setConfetti] = useState(false);
 
   const load = useCallback(() => api('/classes/' + cls.id + '/quizzes').then(setList), [cls.id]);
   useEffect(() => { load(); }, [load]);
 
-  const byKind = (z) => kindFilter === 'all' || z.kind === kindFilter;
-  const todo = list.filter((z) => !z.myStatus && byKind(z));
-  const done = list.filter((z) => z.myStatus && byKind(z));
+  const isl = islandOf(cls);
+
+  // 關卡編號 = 老師出題的先後順序（固定，不會因為篩選而改變）
+  const levels = useMemo(
+    () => [...(list || [])].sort((a, b) => a.id - b.id).map((z, i) => ({ ...z, level: i + 1 })),
+    [list]
+  );
+  const doneCount = levels.filter((z) => z.myStatus).length;
+  const totalStars = levels.reduce((n, z) => n + (z.myStatus === 'graded' ? starsForScore(z.myScore) : 0), 0);
+  const pct = levels.length ? Math.round((doneCount / levels.length) * 100) : 0;
+  const nextId = (levels.find((z) => !z.myStatus) || {}).id;
+  const shown = levels.filter((z) =>
+    (statusFilter === 'all' || (statusFilter === 'todo' ? !z.myStatus : !!z.myStatus)) &&
+    (kindFilter === 'all' || z.kind === kindFilter));
 
   if (taking) {
     return (
       <div className="wrap">
-        <button className="ghost" onClick={() => setTaking(null)}>← 返回課程</button>
+        <button className="ghost" onClick={() => setTaking(null)}>← 回到地圖</button>
         <QuizTaker quizSummary={taking} onDone={() => {
           setTaking(null);
-          setFlash('已交卷！選擇題已自動批改，簡答題等待老師批改。');
+          setFlash('🎉 闖關完成！選擇題已自動批改，簡答題等老師批改。');
+          setConfetti(true);
           load();
           setTimeout(() => setFlash(''), 5000);
+          setTimeout(() => setConfetti(false), 4200);
         }} />
       </div>
     );
@@ -1068,7 +1260,7 @@ function StudentCourse({ cls, onBack }) {
   if (viewing) {
     return (
       <div className="wrap">
-        <button className="ghost" onClick={() => setViewing(null)}>← 返回課程</button>
+        <button className="ghost" onClick={() => setViewing(null)}>← 回到地圖</button>
         <QuizResult quizSummary={viewing} />
       </div>
     );
@@ -1076,55 +1268,77 @@ function StudentCourse({ cls, onBack }) {
 
   return (
     <div className="wrap">
-      <button className="ghost" onClick={onBack}>← 返回首頁</button>
-      <h1>{cls.name}</h1>
-      <div className="tabs">
-        <button className={tab === 'todo' ? 'active' : 'ghost'} onClick={() => setTab('todo')}>待完成 ({todo.length})</button>
-        <button className={tab === 'done' ? 'active' : 'ghost'} onClick={() => setTab('done')}>已完成 ({done.length})</button>
+      {confetti && <Confetti />}
+      <button className="ghost" onClick={onBack}>← 回到我的小島</button>
+
+      <div className="card hero course-hero" style={{ '--island-bg': isl.bg }}>
+        <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'nowrap' }}>
+          <div>
+            <h1 style={{ color: '#fff', marginTop: 0 }}>{cls.name}</h1>
+            <p style={{ margin: 0, opacity: .95 }}>{cls.teacherName} 老師的小島</p>
+          </div>
+          <span className="emoji-xl">{isl.emoji}</span>
+        </div>
+        <div className="row" style={{ justifyContent: 'space-between', marginTop: 14 }}>
+          <span>已通關 <b><CountUp value={doneCount} /></b> / {levels.length} 關</span>
+          <span>⭐ <b><CountUp value={totalStars} /></b> 顆星</span>
+        </div>
+        <PBar pct={pct} />
       </div>
 
-      <div className="row" style={{ marginTop: 12 }}>
-        <span className="muted">類別：</span>
-        {KIND_FILTERS.map((f) => (
-          <span key={f.value} className={'chip ' + (kindFilter === f.value ? 'active' : '')}
-            onClick={() => setKindFilter(f.value)}>{f.label}</span>
-        ))}
+      {flash && <div className="card flash">{flash}</div>}
+
+      <div className="filters">
+        <div className="row">
+          {STATUS_FILTERS.map((f) => (
+            <span key={f.value} className={'chip ' + (statusFilter === f.value ? 'active' : '')}
+              onClick={() => setStatusFilter(f.value)}>{f.label}</span>
+          ))}
+        </div>
+        <div className="row">
+          <span className="muted">類別：</span>
+          {KIND_FILTERS.map((f) => (
+            <span key={f.value} className={'chip ' + (kindFilter === f.value ? 'active' : '')}
+              onClick={() => setKindFilter(f.value)}>{f.label}</span>
+          ))}
+        </div>
       </div>
 
-      {flash && (
-        <div className="card" style={{ background: 'var(--ok-bg)', border: '1px solid var(--ok-border)', color: 'var(--ok-text)', fontWeight: 600 }}>
-          {flash}
+      {list === null && <div className="loading"><span className="spinner" /> 地圖載入中…</div>}
+      {list !== null && shown.length === 0 && (
+        <div className="card empty">
+          <span className="mascot big">🦊</span>
+          <p>{levels.length === 0 ? '老師還沒有出關卡，先去別的小島逛逛吧！' : '這個條件下沒有關卡，換個篩選看看～'}</p>
         </div>
       )}
 
-      {tab === 'todo' && (
-        todo.length === 0
-          ? <p className="muted" style={{ marginTop: 14 }}>目前沒有待完成的測驗。</p>
-          : todo.map((z) => (
-            <div className="card" key={z.id}>
-              <h2>{z.title} <KindTag kind={z.kind} /></h2>
-              <div className="muted">{z.questionCount} 題{z.dueDate ? ' · 截止 ' + z.dueDate : ''}</div>
-              <div style={{ marginTop: 10 }}><button onClick={() => setTaking(z)}>開始作答</button></div>
-            </div>
-          ))
-      )}
-
-      {tab === 'done' && (
-        done.length === 0
-          ? <p className="muted" style={{ marginTop: 14 }}>還沒有完成任何測驗。</p>
-          : done.map((z) => (
-            <div className="card" key={z.id}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <h2>{z.title} <KindTag kind={z.kind} /></h2>
-                <span className={'tag ' + (z.myStatus === 'graded' ? 'ok' : 'wait')}>
-                  {z.myStatus === 'graded' ? (z.myScore + ' 分') : '待批改'}
-                </span>
+      <div className="quest" key={statusFilter + kindFilter}>
+        {shown.map((z, i) => {
+          const state = !z.myStatus ? 'todo' : z.myStatus === 'graded' ? 'done' : 'wait';
+          return (
+            <div className="quest-row" key={z.id} style={{ animationDelay: i * 80 + 'ms' }}>
+              <div className={'node ' + state}>
+                {state === 'todo' ? z.level : state === 'done' ? '✓' : '⏳'}
+                {z.id === nextId && <span className="bubble">下一關</span>}
               </div>
-              <div className="muted">{z.questionCount} 題</div>
-              <div style={{ marginTop: 10 }}><button className="ghost" onClick={() => setViewing(z)}>查看回饋</button></div>
+              <div className="card quest-card lift">
+                <div className="row" style={{ justifyContent: 'space-between' }}>
+                  <h2>第 {z.level} 關 · {z.title} <KindTag kind={z.kind} /></h2>
+                  {state === 'done' && <span className="tag ok">{z.myScore} 分</span>}
+                  {state === 'wait' && <span className="tag wait">批改中</span>}
+                </div>
+                <div className="muted">{z.questionCount} 題{z.dueDate ? ' · 截止 ' + z.dueDate : ''}</div>
+                <div className="row" style={{ marginTop: 10, justifyContent: 'space-between' }}>
+                  {state === 'done' ? <Stars n={starsForScore(z.myScore)} /> : <span />}
+                  {state === 'todo'
+                    ? <button onClick={() => setTaking(z)}>🚩 開始闖關</button>
+                    : <button className="ghost" onClick={() => setViewing(z)}>{state === 'done' ? '看成績與解答' : '看我的答案'}</button>}
+                </div>
+              </div>
             </div>
-          ))
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1147,13 +1361,13 @@ function App() {
 
   const logout = () => { tokenStore.clear(); setUser(null); };
 
-  if (loading) return <div className="wrap">載入中…</div>;
+  if (loading) return <div className="wrap"><div className="loading"><span className="spinner" /> 載入中…</div></div>;
   if (!user) return <AuthScreen onLogin={setUser} />;
 
   return (
     <>
       <header className="bar">
-        <span className="brand">教學練習平台</span>
+        <span className="brand"><span className="mascot-sm">🦊</span> 教學練習平台</span>
         <span className="who">
           {user.name}（{user.role === 'teacher' ? '教師' : '學生'}）
           <a href="#" onClick={(e) => { e.preventDefault(); logout(); }}>登出</a>
