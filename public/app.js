@@ -989,106 +989,63 @@ function TeacherApp({ user }) {
 // 課程 = 一座小島（有進度環）；測驗 = 地圖上的一個關卡（待挑戰會發光、通關會拿星星）。
 // ========================================================================
 
-// 海面上一座一座的島：島排成一橫列，在海上用滑鼠滾輪（往下滾）、觸控滑動、左右按鈕或下方圓點橫向切換。
-// 滾輪在海面上時會被轉成橫向捲動；捲到頭了才會繼續讓整個頁面往下捲。
+// ========================================================================
+// 全螢幕小島首頁：整個畫面就是一片海，島嶼排成一橫列，往下滾（或左右滑）切換島嶼。
+// 原本上方的 banner、下方的「探索新小島」都收進右下角的小卡片（HUD）。
+// ========================================================================
 const ISLE_SHAPES = [
   '58% 42% 55% 45% / 52% 60% 40% 48%',
   '46% 54% 42% 58% / 58% 44% 56% 42%',
   '60% 40% 50% 50% / 44% 56% 44% 56%',
 ];
 
-function IslandSea({ classes, onEnter, onLeave }) {
-  const ref = useRef(null);
-  const [active, setActive] = useState(0);
-
-  const updateActive = useCallback(() => {
-    const el = ref.current;
-    if (!el) return;
-    const mid = el.scrollLeft + el.clientWidth / 2;
-    let best = 0, bestDist = Infinity;
-    Array.from(el.children).forEach((ch, i) => {
-      const d = Math.abs(ch.offsetLeft + ch.offsetWidth / 2 - mid);
-      if (d < bestDist) { bestDist = d; best = i; }
-    });
-    setActive(best);
-  }, []);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return undefined;
-    const onWheel = (e) => {
-      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return; // 本來就是橫向手勢，交給瀏覽器
-      const max = el.scrollWidth - el.clientWidth;
-      const canGo = (e.deltaY > 0 && el.scrollLeft < max - 1) || (e.deltaY < 0 && el.scrollLeft > 1);
-      if (!canGo) return;
-      e.preventDefault();
-      el.scrollLeft += e.deltaY;
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    updateActive();
-    return () => el.removeEventListener('wheel', onWheel);
-  }, [classes.length, updateActive]);
-
-  const goTo = (i) => {
-    const el = ref.current;
-    const target = el && el.children[Math.max(0, Math.min(classes.length - 1, i))];
-    if (target) el.scrollTo({ left: target.offsetLeft + target.offsetWidth / 2 - el.clientWidth / 2, behavior: 'smooth' });
-  };
-
+// 純裝飾的背景：太陽、雲、鳥、帆船、浪、跳出水面的魚、閃光。
+// 分成遠／中／近三層，會隨著島嶼橫向移動做視差（--p 由場景在捲動時更新）。
+function SceneBackdrop() {
+  const sparkles = useMemo(() => Array.from({ length: 22 }, () => ({
+    left: Math.random() * 100, top: 44 + Math.random() * 52, delay: Math.random() * 5, size: 4 + Math.random() * 7,
+  })), []);
   return (
-    <div className="sea-wrap">
-      <div className="sea" ref={ref} onScroll={updateActive}>
-        {classes.map((c, i) => {
-          const isl = islandOf(c);
-          const pct = c.quizCount ? Math.round((c.completedCount / c.quizCount) * 100) : 0;
-          return (
-            <div key={c.id} className={'isle-item' + (i === active ? ' active' : '')}
-              style={{ '--island-bg': isl.bg, '--isle-shape': ISLE_SHAPES[c.id % ISLE_SHAPES.length], '--drift': (i % 2 ? 14 : -6) + 'px' }}>
-              <div className="isle-label">
-                <div>
-                  <strong>{c.name}</strong>
-                  <div className="muted">{c.teacherName} 老師 · 已通關 {c.completedCount} / {c.quizCount} 關</div>
-                </div>
-                <Ring pct={pct} size={50} stroke={6}>{pct}%</Ring>
-              </div>
-              <div className="isle" role="button" tabIndex={0} aria-label={'前往課程 ' + c.name}
-                onClick={() => (i === active ? onEnter(c) : goTo(i))}
-                onKeyDown={(e) => { if (e.key === 'Enter') onEnter(c); }}>
-                <div className="isle-sand" />
-                <div className="isle-grass" />
-                <span className="isle-emoji">{isl.emoji}</span>
-                <span className="isle-go">{i === active ? '出發' : '看看'}</span>
-              </div>
-              <div className="isle-ripple" />
-              <button type="button" className="isle-leave" onClick={() => onLeave(c)}>退出這座島</button>
-            </div>
-          );
-        })}
+    <div className="scene-bg" aria-hidden="true">
+      <div className="px px-far">
+        <div className="sun"><i /></div>
+        <div className="cloud c1" /><div className="cloud c2" /><div className="cloud c3" /><div className="cloud c4" />
       </div>
-      {classes.length > 1 && (
-        <>
-          <button type="button" className="sea-arrow left" aria-label="上一座島" disabled={active === 0} onClick={() => goTo(active - 1)}>&lt;</button>
-          <button type="button" className="sea-arrow right" aria-label="下一座島" disabled={active === classes.length - 1} onClick={() => goTo(active + 1)}>&gt;</button>
-          <div className="sea-dots">
-            {classes.map((c, i) => (
-              <button key={c.id} type="button" aria-label={'第 ' + (i + 1) + ' 座島'} className={i === active ? 'on' : ''} onClick={() => goTo(i)} />
-            ))}
-          </div>
-        </>
-      )}
+      <div className="px px-mid">
+        <svg className="bird b1" viewBox="0 0 28 12"><path d="M1 9 Q7 0 14 8 Q21 0 27 9" /></svg>
+        <svg className="bird b2" viewBox="0 0 28 12"><path d="M1 9 Q7 0 14 8 Q21 0 27 9" /></svg>
+        <svg className="bird b3" viewBox="0 0 28 12"><path d="M1 9 Q7 0 14 8 Q21 0 27 9" /></svg>
+        <div className="boat">
+          <svg viewBox="0 0 80 70">
+            <path d="M40 4 L40 44 L12 44 Z" fill="#fff" />
+            <path d="M44 14 L44 44 L66 44 Z" fill="#ffd9a0" />
+            <path d="M6 48 H74 L64 62 H16 Z" fill="#c9824b" />
+            <path d="M6 48 H74 L72 52 H8 Z" fill="#a8683a" />
+          </svg>
+        </div>
+      </div>
+      <div className="px px-near">
+        <div className="wave w1" /><div className="wave w2" /><div className="wave w3" />
+        <svg className="fish f1" viewBox="0 0 40 20"><path d="M2 10 Q12 0 26 6 L38 1 L34 10 L38 19 L26 14 Q12 20 2 10Z" /></svg>
+        <svg className="fish f2" viewBox="0 0 40 20"><path d="M2 10 Q12 0 26 6 L38 1 L34 10 L38 19 L26 14 Q12 20 2 10Z" /></svg>
+        {sparkles.map((s, i) => (
+          <i key={i} className="spark" style={{ left: s.left + '%', top: s.top + '%', width: s.size, height: s.size, animationDelay: s.delay + 's' }} />
+        ))}
+      </div>
     </div>
   );
 }
 
-function StudentHome({ user, onEnterCourse }) {
-  const [classes, setClasses] = useState(null);
-  const [stats, setStats] = useState(null);
+// 右下角的小卡片：問候、天氣、統計、加入新課程、登出，全部收在這裡。手機上預設收成一顆小按鈕。
+function SceneHud({ user, stats, mission, classCount, onLogout, onJoined, forceOpen }) {
+  const weather = useWeather();
+  const [open, setOpen] = useState(() => forceOpen || window.innerWidth > 640);
   const [code, setCode] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [joined, setJoined] = useState(false);
 
-  const load = useCallback(() => api('/classes').then(setClasses), []);
-  useEffect(() => { load(); api('/dashboard').then(setStats); }, [load]);
+  useEffect(() => { if (forceOpen) setOpen(true); }, [forceOpen]);
 
   const join = async (e) => {
     e.preventDefault();
@@ -1096,10 +1053,205 @@ function StudentHome({ user, onEnterCourse }) {
     setErr(''); setBusy(true);
     try {
       await api('/classes/join', { method: 'POST', body: { code } });
-      setCode('');
-      load(); api('/dashboard').then(setStats);
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+      setCode(''); setJoined(true);
+      setTimeout(() => setJoined(false), 1800);
+      onJoined();
+    } catch (e2) { setErr(e2.message); } finally { setBusy(false); }
   };
+
+  const pending = stats ? stats.pendingQuizCount : 0;
+  const statList = [
+    { label: '我的小島', value: stats ? stats.classCount : classCount },
+    { label: '待挑戰', value: pending },
+    { label: '已通關', value: stats ? stats.completedQuizCount : 0 },
+  ];
+
+  return (
+    <div className={'hud' + (open ? ' open' : '')}>
+      {!open && (
+        <button type="button" className="hud-fab" aria-label="打開選單" onClick={() => setOpen(true)}>
+          <span className="mascot">🦊</span>
+          {pending > 0 && <b className="hud-badge">{pending}</b>}
+        </button>
+      )}
+      {open && (
+        <div className="hud-body">
+          <div className="hud-head">
+            <span className="mascot hud-fox">🦊</span>
+            <div className="hud-title">
+              <strong>嗨，{user.name}</strong>
+              <div className="hud-sub">{friendlyDate()}{weather && <> · {weatherIcon(weather.code)} {weather.temp}°C</>}</div>
+            </div>
+            <button type="button" className="hud-min" aria-label="收起" onClick={() => setOpen(false)}>&minus;</button>
+          </div>
+          {mission && <div className="hud-mission">{mission}</div>}
+          <div className="hud-stats">
+            {statList.map((s, i) => (
+              <div key={s.label} className="hud-stat" style={{ animationDelay: (i * 90 + 250) + 'ms' }}>
+                <b><CountUp value={s.value} /></b><span>{s.label}</span>
+              </div>
+            ))}
+          </div>
+          <form className="hud-join" onSubmit={join}>
+            <input placeholder="輸入 6 碼課程代碼，探索新小島" value={code} maxLength={12}
+              onChange={(e) => setCode(e.target.value.toUpperCase())} />
+            <button disabled={busy}>{joined ? '成功' : '上島'}</button>
+          </form>
+          {err && <div className="err hud-err">{err}</div>}
+          <div className="hud-foot">
+            <span>教學練習平台</span>
+            <a href="#" onClick={(e) => { e.preventDefault(); onLogout(); }}>登出</a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IslandScene({ classes, user, stats, mission, onEnter, onLeave, onLogout, onJoined }) {
+  const sceneRef = useRef(null);
+  const seaRef = useRef(null);
+  const activeRef = useRef(0);
+  const cooldownRef = useRef(0);
+  const wheelAcc = useRef(0);
+  const [active, setActive] = useState(0);
+  const [touched, setTouched] = useState(false);
+  const [entering, setEntering] = useState(null);
+
+  const count = classes.length;
+
+  const updateActive = useCallback(() => {
+    const el = seaRef.current;
+    if (!el) return;
+    const mid = el.scrollLeft + el.clientWidth / 2;
+    let best = 0, bestDist = Infinity;
+    Array.from(el.children).forEach((ch, i) => {
+      const d = Math.abs(ch.offsetLeft + ch.offsetWidth / 2 - mid);
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    activeRef.current = best;
+    setActive(best);
+    const max = el.scrollWidth - el.clientWidth;
+    if (sceneRef.current) sceneRef.current.style.setProperty('--p', max > 0 ? (el.scrollLeft / max).toFixed(3) : '0');
+  }, []);
+
+  const goTo = useCallback((i) => {
+    const el = seaRef.current;
+    const target = el && el.children[Math.max(0, Math.min(count - 1, i))];
+    if (target) el.scrollTo({ left: target.offsetLeft + target.offsetWidth / 2 - el.clientWidth / 2, behavior: 'smooth' });
+  }, [count]);
+
+  // 畫面是固定的全螢幕：整個場景上的滾輪（往下滾）都轉成「切到下一座島」，一次手勢切一座
+  useEffect(() => {
+    document.body.classList.add('scene-open');
+    const scene = sceneRef.current;
+    const onWheel = (e) => {
+      e.preventDefault();
+      setTouched(true);
+      const d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      wheelAcc.current += d;
+      const now = Date.now();
+      if (Math.abs(wheelAcc.current) < 30 || now < cooldownRef.current) return;
+      goTo(activeRef.current + (wheelAcc.current > 0 ? 1 : -1));
+      wheelAcc.current = 0;
+      cooldownRef.current = now + 420;
+    };
+    const onKey = (e) => {
+      if (/input|textarea/i.test((e.target && e.target.tagName) || '')) return;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { setTouched(true); goTo(activeRef.current + 1); }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { setTouched(true); goTo(activeRef.current - 1); }
+    };
+    scene.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('keydown', onKey);
+    updateActive();
+    return () => {
+      document.body.classList.remove('scene-open');
+      scene.removeEventListener('wheel', onWheel);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [goTo, updateActive]);
+
+  // 課程變多或變少（加入、退出）之後，重新算一次目前是哪座島
+  useEffect(() => { updateActive(); }, [count, updateActive]);
+
+  const dive = (c) => {
+    setEntering(c.id);
+    setTimeout(() => onEnter(c), 520);
+  };
+
+  return (
+    <div className={'scene' + (entering ? ' entering' : '')} ref={sceneRef}>
+      <SceneBackdrop />
+
+      {count === 0 ? (
+        <div className="sea sea-empty">
+          <div className="isle-mystery">
+            <div className="isle-sand" /><div className="isle-grass" /><span className="isle-q">?</span>
+          </div>
+          <p className="empty-note">還沒有小島耶，跟老師拿 6 碼代碼，在右下角輸入就能上島囉！</p>
+        </div>
+      ) : (
+        <div className="sea" ref={seaRef} onScroll={updateActive} onTouchStart={() => setTouched(true)}>
+          {classes.map((c, i) => {
+            const isl = islandOf(c);
+            const pct = c.quizCount ? Math.round((c.completedCount / c.quizCount) * 100) : 0;
+            const here = i === active;
+            return (
+              <div key={c.id}
+                className={'isle-item' + (here ? ' active' : '') + (entering === c.id ? ' diving' : '')}
+                style={{ '--island-bg': isl.bg, '--isle-shape': ISLE_SHAPES[c.id % ISLE_SHAPES.length], '--i': i, '--drift': (i % 2 ? 2 : -1) + 'vh' }}>
+                <div className="isle-label" key={here ? 'on' : 'off'}>
+                  <div className="isle-label-text">
+                    <strong>{c.name}</strong>
+                    <span>{c.teacherName} 老師 · 已通關 {c.completedCount} / {c.quizCount} 關</span>
+                  </div>
+                  <Ring pct={pct} size={48} stroke={6} color="#ff7a59" track="rgba(70,50,20,.12)"><span className="ring-pct">{pct}%</span></Ring>
+                </div>
+                <div className="isle" role="button" tabIndex={0} aria-label={'前往課程 ' + c.name}
+                  onClick={() => (here ? dive(c) : goTo(i))}
+                  onKeyDown={(e) => { if (e.key === 'Enter') dive(c); }}>
+                  <span className="isle-ring r1" /><span className="isle-ring r2" />
+                  <div className="isle-sand" />
+                  <div className="isle-grass" />
+                  <div className="isle-hill" />
+                  <span className="isle-bush b1" /><span className="isle-bush b2" />
+                  <span className="isle-emoji">{isl.emoji}</span>
+                  <span className="isle-go">{here ? '出發' : '看看'}</span>
+                </div>
+                <div className="isle-ripple" />
+                <button type="button" className="isle-leave" onClick={() => onLeave(c)}>退出這座島</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {count > 1 && (
+        <>
+          <button type="button" className="sea-arrow left" aria-label="上一座島" disabled={active === 0} onClick={() => { setTouched(true); goTo(active - 1); }}>&lt;</button>
+          <button type="button" className="sea-arrow right" aria-label="下一座島" disabled={active === count - 1} onClick={() => { setTouched(true); goTo(active + 1); }}>&gt;</button>
+          <div className="sea-dots">
+            {classes.map((c, i) => (
+              <button key={c.id} type="button" aria-label={'第 ' + (i + 1) + ' 座島'} className={i === active ? 'on' : ''} onClick={() => goTo(i)} />
+            ))}
+          </div>
+          <div className={'scene-hint' + (touched ? ' gone' : '')}>往下滾動或左右滑動，選擇你的島嶼</div>
+        </>
+      )}
+
+      <SceneHud user={user} stats={stats} mission={mission} classCount={count}
+        forceOpen={count === 0} onLogout={onLogout} onJoined={onJoined} />
+    </div>
+  );
+}
+
+function StudentHome({ user, onEnterCourse, onLogout }) {
+  const [classes, setClasses] = useState(null);
+  const [stats, setStats] = useState(null);
+
+  const load = useCallback(() => api('/classes').then(setClasses), []);
+  useEffect(() => { load(); api('/dashboard').then(setStats); }, [load]);
+  const refresh = () => { load(); api('/dashboard').then(setStats); };
 
   const leaveClass = async (c) => {
     const ok = window.confirm(
@@ -1108,8 +1260,8 @@ function StudentHome({ user, onEnterCourse }) {
     if (!ok) return;
     try {
       await api('/classes/' + c.id + '/leave', { method: 'DELETE' });
-      load(); api('/dashboard').then(setStats);
-    } catch (e) { setErr(e.message); }
+      refresh();
+    } catch (e) { window.alert(e.message); }
   };
 
   const mission = !stats ? null
@@ -1117,227 +1269,10 @@ function StudentHome({ user, onEnterCourse }) {
     : stats.pendingQuizCount > 0 ? `🚩 還有 ${stats.pendingQuizCount} 個關卡等你挑戰！`
     : '🎉 目前的關卡都通關了，太厲害了！';
 
+  if (!classes) return <div className="scene scene-loading"><div className="loading"><span className="spinner" /> 正在出海…</div></div>;
   return (
-    <div className="wrap">
-      <Dashboard user={user} mascot mission={mission} stats={stats && [
-        { label: '我的小島', value: stats.classCount },
-        { label: '待挑戰關卡', value: stats.pendingQuizCount },
-        { label: '已通關', value: stats.completedQuizCount },
-      ]} />
-
-      <h2 className="section-title">🗺️ 我的小島</h2>
-      {classes && classes.length === 0 && (
-        <div className="card empty">
-          <span className="mascot big">🦊</span>
-          <p>還沒有小島耶～跟老師拿 6 碼代碼，在下面輸入就能上島囉！</p>
-        </div>
-      )}
-      {classes && classes.length > 0 && <IslandSea classes={classes} onEnter={onEnterCourse} onLeave={leaveClass} />}
-
-      <form className="card join" onSubmit={join}>
-        <h2>🧭 探索新小島</h2>
-        <div className="row">
-          <input style={{ flex: 1 }} placeholder="輸入老師給的 6 碼課程代碼" value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())} />
-          <button disabled={busy}>上島</button>
-        </div>
-        {err && <div className="err">{err}</div>}
-      </form>
-    </div>
-  );
-}
-
-// 學生作答頁：進來時題目順序、每題選項順序都重新洗牌一次
-function QuizTaker({ quizSummary, onDone }) {
-  const [quiz, setQuiz] = useState(null);
-  const [order, setOrder] = useState(null); // 洗牌後的題目陣列（含每題自己的選項顯示順序）
-  const [answers, setAnswers] = useState({}); // questionId -> content（single: 原始索引；multiple: 原始索引陣列；short: 文字）
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    api('/quizzes/' + quizSummary.id).then((z) => {
-      setQuiz(z);
-      const qOrder = shuffled(z.questions).map((q) => ({
-        ...q,
-        displayOptions: q.type === 'short' ? [] : shuffled(q.options.map((text, idx) => ({ text, idx }))),
-      }));
-      setOrder(qOrder);
-    });
-  }, [quizSummary.id]);
-
-  if (!order) return <div className="loading"><span className="spinner" /> 載入題目中…</div>;
-
-  const setAnswer = (qid, content) => setAnswers((a) => ({ ...a, [qid]: content }));
-  const isAnswered = (q) => {
-    const a = answers[q.id];
-    return q.type === 'short' ? !!(a && String(a).trim()) : (a !== undefined && !(Array.isArray(a) && a.length === 0));
-  };
-  const answeredCount = order.filter(isAnswered).length;
-  const pct = Math.round((answeredCount / order.length) * 100);
-
-  const submit = async () => {
-    setErr('');
-    if (answeredCount < order.length) { setErr('還有題目沒作答喔，全部寫完再交卷！'); return; }
-    setBusy(true);
-    try {
-      const payload = { answers: order.map((q) => ({ questionId: q.id, content: answers[q.id] })) };
-      await api('/quizzes/' + quiz.id + '/submit', { method: 'POST', body: payload });
-      onDone();
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
-  };
-
-  return (
-    <>
-      <div className="quiz-progress">
-        <div className="row" style={{ justifyContent: 'space-between' }}>
-          <strong>{quiz.title} <KindTag kind={quiz.kind} /></strong>
-          <span className="muted">已作答 {answeredCount} / {order.length} 題</span>
-        </div>
-        <div className="pbar live"><i style={{ width: pct + '%' }} /></div>
-      </div>
-
-      {order.map((q, i) => (
-        <div key={q.id} className={'card q-card' + (isAnswered(q) ? ' answered' : '')} style={{ animationDelay: i * 70 + 'ms' }}>
-          <div className="row">
-            <span className="q-badge">{i + 1}</span>
-            <span className="tag">{TYPE_LABEL[q.type]}</span>
-            {isAnswered(q) && <span className="q-check">✔</span>}
-          </div>
-          <p className="q-text">{q.description}</p>
-          {q.type === 'single' && q.displayOptions.map(({ text, idx }, k) => (
-            <label key={idx} className={'opt' + (answers[q.id] === idx ? ' selected' : '')}>
-              <b className="opt-key">{String.fromCharCode(65 + k)}</b>
-              <input type="radio" name={'q' + q.id} checked={answers[q.id] === idx} onChange={() => setAnswer(q.id, idx)} />
-              <span>{text}</span>
-            </label>
-          ))}
-          {q.type === 'multiple' && (
-            <>
-              <p className="muted" style={{ margin: '0 0 4px' }}>可以選很多個喔（選錯會扣分，小心！）</p>
-              {q.displayOptions.map(({ text, idx }, k) => {
-                const cur = answers[q.id] || [];
-                return (
-                  <label key={idx} className={'opt' + (cur.includes(idx) ? ' selected' : '')}>
-                    <b className="opt-key">{String.fromCharCode(65 + k)}</b>
-                    <input type="checkbox" checked={cur.includes(idx)}
-                      onChange={(e) => setAnswer(q.id, e.target.checked ? [...cur, idx] : cur.filter((x) => x !== idx))} />
-                    <span>{text}</span>
-                  </label>
-                );
-              })}
-            </>
-          )}
-          {q.type === 'short' && (
-            <textarea rows="3" value={answers[q.id] || ''} onChange={(e) => setAnswer(q.id, e.target.value)} placeholder="把你的想法寫下來…" />
-          )}
-        </div>
-      ))}
-      {err && <div className="err" key={err}>{err}</div>}
-      <div style={{ marginTop: 18 }}>
-        <button className="big-btn" disabled={busy} onClick={submit}>{busy ? '交卷中…' : '🚀 交卷！'}</button>
-      </div>
-    </>
-  );
-}
-
-// AI 小老師的回饋區塊（學生端、老師端共用）。老師端不傳 onRetry。
-function AiNote({ a, onRetry }) {
-  if (a.aiStatus === 'pending') {
-    return <p className="ai-note"><span className="spinner" /> AI 小老師正在看你的答案…</p>;
-  }
-  if (a.aiStatus === 'done' && a.aiFeedback) {
-    return (
-      <p className="ai-note">
-        <strong>AI 小老師：</strong>{a.aiFeedback}
-        <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 4 }}>AI 的建議僅供參考，可能出錯，請以老師的說明為準。</span>
-      </p>
-    );
-  }
-  if (a.aiStatus === 'failed' || a.aiStatus === 'limit') {
-    return (
-      <p className="muted">
-        {a.aiStatus === 'limit' ? '今天的 AI 回饋次數用完了，明天再來看看。' : 'AI 小老師這次沒有成功回覆。'}
-        {onRetry && <> <button className="ghost" onClick={onRetry}>重新產生</button></>}
-      </p>
-    );
-  }
-  return null;
-}
-
-function QuizResult({ quizSummary, onRetake }) {
-  const [detail, setDetail] = useState(null);
-  useEffect(() => { api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail); }, [quizSummary.id]);
-
-  // AI 回饋在背景產生：還有 pending 的題目就每 3 秒更新一次（最多約 90 秒）
-  const hasPending = detail && detail.answers.some((a) => a.aiStatus === 'pending');
-  useEffect(() => {
-    if (!hasPending) return undefined;
-    let tries = 0;
-    const t = setInterval(() => {
-      tries += 1;
-      api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail);
-      if (tries >= 30) clearInterval(t);
-    }, 3000);
-    return () => clearInterval(t);
-  }, [hasPending, quizSummary.id]);
-  const aiRetry = async () => {
-    await api('/quizzes/' + quizSummary.id + '/ai-retry', { method: 'POST' });
-    setDetail(await api('/quizzes/' + quizSummary.id + '/my-submission'));
-  };
-
-  const graded = quizSummary.myStatus === 'graded';
-  const score = quizSummary.myScore;
-  const gradedAnswers = detail ? detail.answers.filter((a) => a.status === 'graded') : [];
-  const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
-  const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;
-  const msg = !graded ? '老師還在批改中，先來看看你的答案吧！'
-    : score >= 90 ? '太棒了！你真是小天才 🌟'
-    : score >= 60 ? '不錯喔，再接再厲 💪'
-    : '沒關係，看看解釋，下次一定更好 🌱';
-  const icon = (a) => (a.status !== 'graded' ? '⏳' : a.score >= 100 ? '✅' : a.score > 0 ? '🟡' : '❌');
-
-  return (
-    <>
-      {graded && score >= 90 && <Confetti />}
-      <div className="card hero score-hero">
-        <div>
-          <h1 style={{ color: '#fff', marginTop: 0 }}>{quizSummary.title} <KindTag kind={quizSummary.kind} /></h1>
-          <p style={{ margin: '4px 0 10px', opacity: .95 }}>{msg}</p>
-          {graded && <Stars n={starsForScore(score)} size={30} />}
-          {detail && (
-            <p style={{ margin: '10px 0 0', opacity: .95, fontSize: 13 }}>
-              共 {detail.answers.length} 題，已批改 {gradedAnswers.length} 題
-              {objectiveGraded > 0 && `，選擇題答對 ${correctCount}/${objectiveGraded} 題`}
-            </p>
-          )}
-        </div>
-        {graded
-          ? <Ring pct={score} size={104} stroke={10}><span className="big-score"><CountUp value={score} /></span></Ring>
-          : <span className="mascot big">⏳</span>}
-      </div>
-
-      {onRetake && (
-        <div style={{ marginTop: 14 }}><button className="ghost" onClick={onRetake}>重新作答這份測驗</button></div>
-      )}
-      {!detail && <div className="loading"><span className="spinner" /> 載入中…</div>}
-      {detail && detail.answers.map((a, i) => (
-        <div key={a.questionId} className="card q-card" style={{ animationDelay: i * 70 + 'ms' }}>
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <span className="row"><span className="q-icon">{icon(a)}</span><strong>第 {a.seq} 題</strong></span>
-            <span className={'tag ' + (a.status === 'graded' ? (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '') : 'wait')}>
-              {a.status === 'graded' ? (a.score + ' 分') : '待批改'}
-            </span>
-          </div>
-          <p className="q-text">{a.description}</p>
-          <CorrectAnswerHint a={a} />
-          <p>你的作答：<AnswerCell a={a} /></p>
-          {a.status === 'graded' && a.feedback && <p className="teacher-note"><strong>老師回饋：</strong>{a.feedback}</p>}
-          {a.status === 'graded' && !a.feedback && <p className="muted">老師沒有留下文字回饋。</p>}
-          <AiNote a={a} onRetry={aiRetry} />
-        </div>
-      ))}
-    </>
+    <IslandScene classes={classes} user={user} stats={stats} mission={mission}
+      onEnter={onEnterCourse} onLeave={leaveClass} onLogout={onLogout} onJoined={refresh} />
   );
 }
 
@@ -1497,16 +1432,19 @@ function StudentCourse({ cls, onBack }) {
   );
 }
 
-function StudentApp({ user }) {
+function StudentApp({ user, onLogout, onScene }) {
   const [cls, setCls] = useState(null);
+  // 在全螢幕小島首頁時，上方的 header 要隱藏（功能都收進右下角小卡片）
+  useEffect(() => { onScene(!cls); return () => onScene(false); }, [cls, onScene]);
   if (cls) return <StudentCourse cls={cls} onBack={() => setCls(null)} />;
-  return <StudentHome user={user} onEnterCourse={setCls} />;
+  return <StudentHome user={user} onEnterCourse={setCls} onLogout={onLogout} />;
 }
 
 // ---------- Root ----------
 function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [fullScene, setFullScene] = useState(false);
 
   useEffect(() => {
     if (!tokenStore.get()) { setLoading(false); return; }
@@ -1520,14 +1458,16 @@ function App() {
 
   return (
     <>
-      <header className="bar">
-        <span className="brand"><span className="mascot-sm">🦊</span> 教學練習平台</span>
-        <span className="who">
-          {user.name}（{user.role === 'teacher' ? '教師' : '學生'}）
-          <a href="#" onClick={(e) => { e.preventDefault(); logout(); }}>登出</a>
-        </span>
-      </header>
-      {user.role === 'teacher' ? <TeacherApp user={user} /> : <StudentApp user={user} />}
+      {!(user.role === 'student' && fullScene) && (
+        <header className="bar">
+          <span className="brand"><span className="mascot-sm">🦊</span> 教學練習平台</span>
+          <span className="who">
+            {user.name}（{user.role === 'teacher' ? '教師' : '學生'}）
+            <a href="#" onClick={(e) => { e.preventDefault(); logout(); }}>登出</a>
+          </span>
+        </header>
+      )}
+      {user.role === 'teacher' ? <TeacherApp user={user} /> : <StudentApp user={user} onLogout={logout} onScene={setFullScene} />}
     </>
   );
 }
