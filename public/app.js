@@ -1276,6 +1276,200 @@ function StudentHome({ user, onEnterCourse, onLogout }) {
   );
 }
 
+// 學生作答頁：進來時題目順序、每題選項順序都重新洗牌一次
+function QuizTaker({ quizSummary, onDone }) {
+  const [quiz, setQuiz] = useState(null);
+  const [order, setOrder] = useState(null); // 洗牌後的題目陣列（含每題自己的選項顯示順序）
+  const [answers, setAnswers] = useState({}); // questionId -> content（single: 原始索引；multiple: 原始索引陣列；short: 文字）
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api('/quizzes/' + quizSummary.id).then((z) => {
+      setQuiz(z);
+      const qOrder = shuffled(z.questions).map((q) => ({
+        ...q,
+        displayOptions: q.type === 'short' ? [] : shuffled(q.options.map((text, idx) => ({ text, idx }))),
+      }));
+      setOrder(qOrder);
+    });
+  }, [quizSummary.id]);
+
+  if (!order) return <div className="loading"><span className="spinner" /> 載入題目中…</div>;
+
+  const setAnswer = (qid, content) => setAnswers((a) => ({ ...a, [qid]: content }));
+  const isAnswered = (q) => {
+    const a = answers[q.id];
+    return q.type === 'short' ? !!(a && String(a).trim()) : (a !== undefined && !(Array.isArray(a) && a.length === 0));
+  };
+  const answeredCount = order.filter(isAnswered).length;
+  const pct = Math.round((answeredCount / order.length) * 100);
+
+  const submit = async () => {
+    setErr('');
+    if (answeredCount < order.length) { setErr('還有題目沒作答喔，全部寫完再交卷！'); return; }
+    setBusy(true);
+    try {
+      const payload = { answers: order.map((q) => ({ questionId: q.id, content: answers[q.id] })) };
+      await api('/quizzes/' + quiz.id + '/submit', { method: 'POST', body: payload });
+      onDone();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <div className="quiz-progress">
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <strong>{quiz.title} <KindTag kind={quiz.kind} /></strong>
+          <span className="muted">已作答 {answeredCount} / {order.length} 題</span>
+        </div>
+        <div className="pbar live"><i style={{ width: pct + '%' }} /></div>
+      </div>
+
+      {order.map((q, i) => (
+        <div key={q.id} className={'card q-card' + (isAnswered(q) ? ' answered' : '')} style={{ animationDelay: i * 70 + 'ms' }}>
+          <div className="row">
+            <span className="q-badge">{i + 1}</span>
+            <span className="tag">{TYPE_LABEL[q.type]}</span>
+            {isAnswered(q) && <span className="q-check">✔</span>}
+          </div>
+          <p className="q-text">{q.description}</p>
+          {q.type === 'single' && q.displayOptions.map(({ text, idx }, k) => (
+            <label key={idx} className={'opt' + (answers[q.id] === idx ? ' selected' : '')}>
+              <b className="opt-key">{String.fromCharCode(65 + k)}</b>
+              <input type="radio" name={'q' + q.id} checked={answers[q.id] === idx} onChange={() => setAnswer(q.id, idx)} />
+              <span>{text}</span>
+            </label>
+          ))}
+          {q.type === 'multiple' && (
+            <>
+              <p className="muted" style={{ margin: '0 0 4px' }}>可以選很多個喔（選錯會扣分，小心！）</p>
+              {q.displayOptions.map(({ text, idx }, k) => {
+                const cur = answers[q.id] || [];
+                return (
+                  <label key={idx} className={'opt' + (cur.includes(idx) ? ' selected' : '')}>
+                    <b className="opt-key">{String.fromCharCode(65 + k)}</b>
+                    <input type="checkbox" checked={cur.includes(idx)}
+                      onChange={(e) => setAnswer(q.id, e.target.checked ? [...cur, idx] : cur.filter((x) => x !== idx))} />
+                    <span>{text}</span>
+                  </label>
+                );
+              })}
+            </>
+          )}
+          {q.type === 'short' && (
+            <textarea rows="3" value={answers[q.id] || ''} onChange={(e) => setAnswer(q.id, e.target.value)} placeholder="把你的想法寫下來…" />
+          )}
+        </div>
+      ))}
+      {err && <div className="err" key={err}>{err}</div>}
+      <div style={{ marginTop: 18 }}>
+        <button className="big-btn" disabled={busy} onClick={submit}>{busy ? '交卷中…' : '🚀 交卷！'}</button>
+      </div>
+    </>
+  );
+}
+
+// AI 小老師的回饋區塊（學生端、老師端共用）。老師端不傳 onRetry。
+function AiNote({ a, onRetry }) {
+  if (a.aiStatus === 'pending') {
+    return <p className="ai-note"><span className="spinner" /> AI 小老師正在看你的答案…</p>;
+  }
+  if (a.aiStatus === 'done' && a.aiFeedback) {
+    return (
+      <p className="ai-note">
+        <strong>AI 小老師：</strong>{a.aiFeedback}
+        <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 4 }}>AI 的建議僅供參考，可能出錯，請以老師的說明為準。</span>
+      </p>
+    );
+  }
+  if (a.aiStatus === 'failed' || a.aiStatus === 'limit') {
+    return (
+      <p className="muted">
+        {a.aiStatus === 'limit' ? '今天的 AI 回饋次數用完了，明天再來看看。' : 'AI 小老師這次沒有成功回覆。'}
+        {onRetry && <> <button className="ghost" onClick={onRetry}>重新產生</button></>}
+      </p>
+    );
+  }
+  return null;
+}
+
+function QuizResult({ quizSummary, onRetake }) {
+  const [detail, setDetail] = useState(null);
+  useEffect(() => { api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail); }, [quizSummary.id]);
+
+  // AI 回饋在背景產生：還有 pending 的題目就每 3 秒更新一次（最多約 90 秒）
+  const hasPending = detail && detail.answers.some((a) => a.aiStatus === 'pending');
+  useEffect(() => {
+    if (!hasPending) return undefined;
+    let tries = 0;
+    const t = setInterval(() => {
+      tries += 1;
+      api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail);
+      if (tries >= 30) clearInterval(t);
+    }, 3000);
+    return () => clearInterval(t);
+  }, [hasPending, quizSummary.id]);
+  const aiRetry = async () => {
+    await api('/quizzes/' + quizSummary.id + '/ai-retry', { method: 'POST' });
+    setDetail(await api('/quizzes/' + quizSummary.id + '/my-submission'));
+  };
+
+  const graded = quizSummary.myStatus === 'graded';
+  const score = quizSummary.myScore;
+  const gradedAnswers = detail ? detail.answers.filter((a) => a.status === 'graded') : [];
+  const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
+  const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;
+  const msg = !graded ? '老師還在批改中，先來看看你的答案吧！'
+    : score >= 90 ? '太棒了！你真是小天才 🌟'
+    : score >= 60 ? '不錯喔，再接再厲 💪'
+    : '沒關係，看看解釋，下次一定更好 🌱';
+  const icon = (a) => (a.status !== 'graded' ? '⏳' : a.score >= 100 ? '✅' : a.score > 0 ? '🟡' : '❌');
+
+  return (
+    <>
+      {graded && score >= 90 && <Confetti />}
+      <div className="card hero score-hero">
+        <div>
+          <h1 style={{ color: '#fff', marginTop: 0 }}>{quizSummary.title} <KindTag kind={quizSummary.kind} /></h1>
+          <p style={{ margin: '4px 0 10px', opacity: .95 }}>{msg}</p>
+          {graded && <Stars n={starsForScore(score)} size={30} />}
+          {detail && (
+            <p style={{ margin: '10px 0 0', opacity: .95, fontSize: 13 }}>
+              共 {detail.answers.length} 題，已批改 {gradedAnswers.length} 題
+              {objectiveGraded > 0 && `，選擇題答對 ${correctCount}/${objectiveGraded} 題`}
+            </p>
+          )}
+        </div>
+        {graded
+          ? <Ring pct={score} size={104} stroke={10}><span className="big-score"><CountUp value={score} /></span></Ring>
+          : <span className="mascot big">⏳</span>}
+      </div>
+
+      {onRetake && (
+        <div style={{ marginTop: 14 }}><button className="ghost" onClick={onRetake}>重新作答這份測驗</button></div>
+      )}
+      {!detail && <div className="loading"><span className="spinner" /> 載入中…</div>}
+      {detail && detail.answers.map((a, i) => (
+        <div key={a.questionId} className="card q-card" style={{ animationDelay: i * 70 + 'ms' }}>
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <span className="row"><span className="q-icon">{icon(a)}</span><strong>第 {a.seq} 題</strong></span>
+            <span className={'tag ' + (a.status === 'graded' ? (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '') : 'wait')}>
+              {a.status === 'graded' ? (a.score + ' 分') : '待批改'}
+            </span>
+          </div>
+          <p className="q-text">{a.description}</p>
+          <CorrectAnswerHint a={a} />
+          <p>你的作答：<AnswerCell a={a} /></p>
+          {a.status === 'graded' && a.feedback && <p className="teacher-note"><strong>老師回饋：</strong>{a.feedback}</p>}
+          {a.status === 'graded' && !a.feedback && <p className="muted">老師沒有留下文字回饋。</p>}
+          <AiNote a={a} onRetry={aiRetry} />
+        </div>
+      ))}
+    </>
+  );
+}
+
 const KIND_FILTERS = [
   { value: 'all', label: '全部' },
   { value: 'normal', label: '一般' },
