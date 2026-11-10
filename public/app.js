@@ -384,7 +384,7 @@ function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
         { label: '課程數', value: stats.classCount },
         { label: '學生數', value: stats.studentCount },
         { label: '測驗數', value: stats.quizCount },
-        { label: '待批改', value: stats.pendingGradingCount },
+        { label: '作答數', value: stats.submissionCount },
       ]} />
       <form className="card" onSubmit={createClass}>
         <h2>開新課程 / 班級</h2>
@@ -411,7 +411,7 @@ function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
           <div className="row" style={{ marginTop: 10 }}>
             <button onClick={() => onEnterCourse(c)}>進入課程 / 出題</button>
             <button className="ghost" onClick={() => onEnterGrading(c)}>
-              批改作答{c.pendingCount > 0 && <span className="count-badge">{c.pendingCount}</span>}
+              教師回饋
             </button>
             <button className="ghost" onClick={() => onEnterManage(c)}>班級管理</button>
             <button className="danger" onClick={() => deleteClass(c)}>刪除課程</button>
@@ -484,11 +484,11 @@ function QuestionEditor({ q, index, onChange, onRemove, removable }) {
           <textarea rows="2" value={q.answerText} placeholder="用逗號分開，例如：光合作用,葉綠素,二氧化碳"
             onChange={(e) => update({ answerText: e.target.value })} />
           <p className="muted" style={{ marginTop: 4 }}>
-            學生作答只要包含其中一個關鍵字，系統就會自動給 100 分（不分大小寫、全形半形，也會忽略空白）；沒對到的話留給你人工批改，不會自動判 0 分。空白作答會直接判 0 分。有啟用 AI 時，對到關鍵字的答案會再由 AI 判讀意思，像「不是○○」這種否定句不會自動給分，會留給你批改。
+            簡答題由 AI 對照這裡的標準答案和詳細解釋，判讀學生答案的意思後直接給分：正確 100 分、部分正確 50 分、不正確 0 分。AI 無法使用時，改用關鍵字比對：作答包含其中一個關鍵字給 100 分，否則 0 分（不分大小寫、全形半形，也會忽略空白）。空白作答一律 0 分。
           </p>
         </>
       )}
-      <label>詳細解釋（選填，批改完會顯示給學生參考）</label>
+      <label>詳細解釋（選填，交卷後會顯示給學生參考）</label>
       <textarea rows="2" value={q.explanation} placeholder="說明為什麼這樣答、補充概念等"
         onChange={(e) => update({ explanation: e.target.value })} />
     </div>
@@ -686,8 +686,7 @@ function QuizOverview({ subs }) {
       <h2>測驗總覽</h2>
       <div className="row" style={{ marginTop: 8 }}>
         <span className="tag">{total} 人交卷</span>
-        <span className="tag ok">{gradedSubs.length} 已批改</span>
-        <span className="tag wait">{total - gradedSubs.length} 待批改</span>
+        {total - gradedSubs.length > 0 && <span className="tag wait">{total - gradedSubs.length} 份 AI 判讀中</span>}
         {overallAvg != null && <span className="tag pre">平均 {overallAvg} 分</span>}
       </div>
       {questionEntries.length > 0 && (
@@ -700,7 +699,7 @@ function QuizOverview({ subs }) {
                   <strong>第 {seq} 題 · {TYPE_LABEL[s.type]}</strong>
                   {avg != null && <span className="tag pre">平均 {avg} 分</span>}
                 </div>
-                {s.graded === 0 && <p className="muted" style={{ margin: '4px 0 0' }}>尚無已批改的作答</p>}
+                {s.graded === 0 && <p className="muted" style={{ margin: '4px 0 0' }}>尚無已計分的作答</p>}
                 {s.graded > 0 && (
                   <div className="row" style={{ marginTop: 6 }}>
                     <span className="tag ok">{Math.round((s.full / s.graded) * 100)}% 全對</span>
@@ -736,8 +735,9 @@ function TeacherQuizDetail({ quiz, onBack, backLabel = '返回課程' }) {
 
 function StudentSubmissionCard({ sub, onGraded }) {
   const [grades, setGrades] = useState(() => Object.fromEntries(
-    sub.answers.map((a) => [a.answerId, { score: a.score ?? '', feedback: a.feedback ?? '' }])
+    sub.answers.map((a) => [a.answerId, { feedback: a.feedback ?? '' }])
   ));
+  const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(false); // 收起這位學生，方便一次檢視很多人時捲動
   const [err, setErr] = useState('');
@@ -750,15 +750,11 @@ function StudentSubmissionCard({ sub, onGraded }) {
     : null;
 
   const saveAll = async () => {
-    const answers = sub.answers
-      .filter((a) => String(grades[a.answerId].score).trim() !== '')
-      .map((a) => ({ answerId: a.answerId, seq: a.seq, score: Number(grades[a.answerId].score), feedback: grades[a.answerId].feedback }));
-    const bad = answers.find((a) => !Number.isFinite(a.score) || a.score < 0 || a.score > 100);
-    if (bad) { setErr('第 ' + bad.seq + ' 題的分數要填 0 到 100 之間的數字'); return; }
-    if (answers.length === 0) { setErr('請至少填一題的分數再儲存'); return; }
-    setErr(''); setBusy(true);
+    const answers = sub.answers.map((a) => ({ answerId: a.answerId, feedback: grades[a.answerId].feedback }));
+    setErr(''); setSaved(false); setBusy(true);
     try {
-      await api('/quiz-submissions/' + sub.id + '/grade', { method: 'POST', body: { answers } });
+      await api('/quiz-submissions/' + sub.id + '/feedback', { method: 'POST', body: { answers } });
+      setSaved(true);
       onGraded();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
@@ -783,7 +779,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
         <span className="row">
           {avgScore != null && <span className="tag pre">平均 {avgScore} 分</span>}
           <span className={'tag ' + (sub.status === 'graded' ? 'ok' : 'wait')}>
-            {sub.status === 'graded' ? '已批改完成' : '待批改'}
+            {sub.status === 'graded' ? '已計分' : 'AI 判讀中'}
           </span>
           <button type="button" className="ghost" onClick={() => setCollapsed((c) => !c)}>
             {collapsed ? '展開' : '收合'}
@@ -797,32 +793,24 @@ function StudentSubmissionCard({ sub, onGraded }) {
         <div key={a.answerId} style={{ borderTop: '1px solid var(--border)', marginTop: 12, paddingTop: 12 }}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <strong>第 {a.seq} 題 · {TYPE_LABEL[a.type]}</strong>
-            {a.status === 'graded' && a.type !== 'short' && (
-              <span className={'tag ' + (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '')}>{a.score} 分（自動批改）</span>
-            )}
+            {a.status === 'graded'
+              ? <span className={'tag ' + (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '')}>{a.score} 分</span>
+              : <span className="tag wait">AI 判讀中</span>}
           </div>
           <p style={{ whiteSpace: 'pre-wrap', margin: '6px 0' }}>{a.description}</p>
           <CorrectAnswerHint a={a} />
           <p>學生作答：<AnswerCell a={a} /></p>
           <AiNote a={a} />
-          <div className="row">
-            <div style={{ width: 90 }}>
-              <label style={{ marginTop: 0 }}>分數</label>
-              <input type="number" min="0" max="100" value={grades[a.answerId].score}
-                onChange={(e) => setGrade(a.answerId, { score: e.target.value })} />
-            </div>
-            <div style={{ flex: 1, minWidth: 200 }}>
-              <label style={{ marginTop: 0 }}>回饋</label>
-              <input value={grades[a.answerId].feedback} placeholder="給學生的評語"
-                onChange={(e) => setGrade(a.answerId, { feedback: e.target.value })} />
-            </div>
-          </div>
+          <label style={{ marginTop: 8 }}>教師回饋（選填）</label>
+          <input value={grades[a.answerId].feedback} placeholder="想對學生說的話"
+            onChange={(e) => { setSaved(false); setGrade(a.answerId, { feedback: e.target.value }); }} />
         </div>
       ))}
       {!collapsed && (
         <div style={{ marginTop: 12 }}>
           {err && <div className="err" style={{ marginBottom: 8 }}>{err}</div>}
-          <button disabled={busy} onClick={saveAll}>儲存批改</button>
+          <button disabled={busy} onClick={saveAll}>儲存回饋</button>
+          {saved && <span className="muted" style={{ marginLeft: 10 }}>已儲存</span>}
         </div>
       )}
     </div>
@@ -860,7 +848,7 @@ function TeacherCourse({ cls, onBack }) {
                 {z.dueDate ? ' · 截止 ' + z.dueDate : ''}
               </div>
             </div>
-            <span className="tag">{z.gradedCount}/{z.submissionCount} 已批改</span>
+            <span className="tag">{z.submissionCount} 人交卷</span>
           </div>
           <div className="row" style={{ marginTop: 10 }}>
             <button className="ghost" onClick={() => startEdit(z)}>編輯題目</button>
@@ -871,61 +859,41 @@ function TeacherCourse({ cls, onBack }) {
   );
 }
 
-// 批改專用頁：從首頁課程卡片的「批改作答」進來，列出這門課每份測驗的交卷與批改進度
+// 教師回饋頁：從首頁課程卡片的「教師回饋」進來，列出這門課每份測驗的作答，老師可以看分數並留下回饋
 function TeacherGrading({ cls, onBack }) {
   const [list, setList] = useState(null);
   const [selectedQuiz, setSelectedQuiz] = useState(null);
-  const [onlyPending, setOnlyPending] = useState(false);
   const load = useCallback(() => api('/classes/' + cls.id + '/quizzes').then(setList), [cls.id]);
   useEffect(() => { load(); }, [load]);
 
   if (selectedQuiz) {
     return (
       <div className="wrap">
-        <TeacherQuizDetail quiz={selectedQuiz} backLabel="返回批改列表" onBack={() => { setSelectedQuiz(null); load(); }} />
+        <TeacherQuizDetail quiz={selectedQuiz} backLabel="返回測驗列表" onBack={() => { setSelectedQuiz(null); load(); }} />
       </div>
     );
   }
 
-  const withPending = (list || []).map((z) => ({ ...z, pending: z.submissionCount - z.gradedCount }));
-  const totalPending = withPending.reduce((n, z) => n + z.pending, 0);
-  const shown = onlyPending ? withPending.filter((z) => z.pending > 0) : withPending;
+  const shown = list || [];
 
   return (
     <div className="wrap">
       <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回首頁</button>
-      <h1>批改作答 · {cls.name}</h1>
-      <div className="card">
-        <div className="row" style={{ justifyContent: 'space-between' }}>
-          <span>
-            {totalPending > 0
-              ? <>還有 <strong>{totalPending}</strong> 份作答等你批改</>
-              : '目前沒有待批改的作答'}
-          </span>
-          <label className="row" style={{ margin: 0, gap: 6, cursor: 'pointer' }}>
-            <input type="checkbox" style={{ width: 'auto' }} checked={onlyPending} onChange={(e) => setOnlyPending(e.target.checked)} />
-            只看待批改
-          </label>
-        </div>
-      </div>
+      <h1>教師回饋 · {cls.name}</h1>
+      <p className="muted">分數由系統和 AI 小老師自動給。你可以在這裡查看每位學生的作答，並留下文字回饋。</p>
       {!list && <div className="loading"><span className="spinner" /> 載入中…</div>}
       {list && list.length === 0 && <p className="muted">這門課還沒有測驗。</p>}
-      {list && list.length > 0 && shown.length === 0 && <p className="muted">沒有待批改的測驗。</p>}
       {shown.map((z) => (
         <div className="card" key={z.id}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <div>
               <h2>{z.title} <KindTag kind={z.kind} /></h2>
-              <div className="muted">{z.questionCount} 題 · {z.submissionCount} 人交卷 · {z.gradedCount} 份已批改</div>
+              <div className="muted">{z.questionCount} 題 · {z.submissionCount} 人交卷</div>
             </div>
-            <span className={'tag ' + (z.pending > 0 ? 'wait' : 'ok')}>
-              {z.pending > 0 ? '待批改 ' + z.pending : z.submissionCount > 0 ? '全部批改完成' : '尚無作答'}
-            </span>
+            {z.submissionCount === 0 && <span className="tag">尚無作答</span>}
           </div>
           <div className="row" style={{ marginTop: 10 }}>
-            <button className={z.pending > 0 ? '' : 'ghost'} onClick={() => setSelectedQuiz(z)}>
-              {z.pending > 0 ? '開始批改' : '查看作答'}
-            </button>
+            <button className={z.submissionCount > 0 ? '' : 'ghost'} onClick={() => setSelectedQuiz(z)}>查看作答 / 寫回饋</button>
           </div>
         </div>
       ))}
@@ -1456,10 +1424,10 @@ function AiNote({ a, onRetry }) {
     const verdict = { correct: ['ok', 'AI 判讀：正確'], partial: ['wait', 'AI 判讀：部分正確'], incorrect: ['', 'AI 判讀：不正確'] }[a.aiVerdict];
     return (
       <p className="ai-note">
-        {/* 判讀結果只給老師看（老師端不會傳 onRetry），當作批改時的參考 */}
+        {/* 判讀結果只給老師看（老師端不會傳 onRetry） */}
         {!onRetry && verdict && <span className={'tag ' + verdict[0]} style={{ marginRight: 8 }}>{verdict[1]}</span>}
         <strong>AI 小老師：</strong>{a.aiFeedback}
-        <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 4 }}>AI 的建議僅供參考，可能出錯，請以老師的說明為準。</span>
+        <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 4 }}>AI 的說明可能出錯，有疑問可以問老師。</span>
       </p>
     );
   }
@@ -1479,7 +1447,7 @@ function QuizResult({ quizSummary, onRetake }) {
   useEffect(() => { api('/quizzes/' + quizSummary.id + '/my-submission').then(setDetail); }, [quizSummary.id]);
 
   // AI 回饋在背景產生：還有 pending 的題目就每 3 秒更新一次（最多約 90 秒）
-  const hasPending = detail && detail.answers.some((a) => a.aiStatus === 'pending');
+  const hasPending = detail && (detail.status !== 'graded' || detail.answers.some((a) => a.aiStatus === 'pending'));
   useEffect(() => {
     if (!hasPending) return undefined;
     let tries = 0;
@@ -1503,7 +1471,7 @@ function QuizResult({ quizSummary, onRetake }) {
   const gradedAnswers = detail ? detail.answers.filter((a) => a.status === 'graded') : [];
   const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
   const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;
-  const msg = !graded ? '老師還在批改中，先來看看你的答案吧！'
+  const msg = !graded ? 'AI 小老師正在看你的簡答題，分數馬上出來！'
     : score >= 90 ? <>太棒了！你真是小天才 <Icon name="sparkle" /></>
     : score >= 60 ? <>不錯喔，再接再厲 <Icon name="lightning" /></>
     : <>沒關係，看看解釋，下次一定更好 <Icon name="plant" /></>;
@@ -1522,7 +1490,7 @@ function QuizResult({ quizSummary, onRetake }) {
           {graded && <Stars n={starsForScore(score)} size={30} />}
           {detail && (
             <p style={{ margin: '10px 0 0', opacity: .95, fontSize: 13 }}>
-              共 {detail.answers.length} 題，已批改 {gradedAnswers.length} 題
+              共 {detail.answers.length} 題{gradedAnswers.length < detail.answers.length && `，已計分 ${gradedAnswers.length} 題`}
               {objectiveGraded > 0 && `，選擇題答對 ${correctCount}/${objectiveGraded} 題`}
             </p>
           )}
@@ -1541,15 +1509,14 @@ function QuizResult({ quizSummary, onRetake }) {
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <span className="row"><span className="q-icon">{icon(a)}</span><strong>第 {a.seq} 題</strong></span>
             <span className={'tag ' + (a.status === 'graded' ? (a.score >= 100 ? 'ok' : a.score > 0 ? 'wait' : '') : 'wait')}>
-              {a.status === 'graded' ? (a.score + ' 分') : '待批改'}
+              {a.status === 'graded' ? (a.score + ' 分') : 'AI 判讀中'}
             </span>
           </div>
           <p className="q-text">{a.description}</p>
           <CorrectAnswerHint a={a} />
           <p>你的作答：<AnswerCell a={a} /></p>
-          {a.status === 'graded' && a.feedback && <p className="teacher-note"><strong>老師回饋：</strong>{a.feedback}</p>}
-          {a.status === 'graded' && !a.feedback && <p className="muted">老師沒有留下文字回饋。</p>}
           <AiNote a={a} onRetry={aiRetry} />
+          {a.feedback && <p className="teacher-note"><strong>教師回饋：</strong>{a.feedback}</p>}
         </div>
       ))}
     </>
@@ -1611,7 +1578,7 @@ function StudentCourse({ cls, onBack }) {
         <button className="ghost" onClick={() => setTaking(null)}><Icon name="arrow-left" /> 回到地圖</button>
         <QuizTaker quizSummary={taking} onDone={() => {
           setTaking(null);
-          setFlash('闖關完成！選擇題已自動批改，簡答題等老師批改。');
+          setFlash('闖關完成！快去看看你的分數和 AI 小老師的回饋。');
           setConfetti(true);
           load();
           setTimeout(() => setFlash(''), 5000);
@@ -1689,7 +1656,7 @@ function StudentCourse({ cls, onBack }) {
                 <div className="row" style={{ justifyContent: 'space-between' }}>
                   <h2>第 {z.level} 關 · {z.title} <KindTag kind={z.kind} /></h2>
                   {state === 'done' && <span className="tag ok">{z.myScore} 分</span>}
-                  {state === 'wait' && <span className="tag wait">批改中</span>}
+                  {state === 'wait' && <span className="tag wait">計分中</span>}
                 </div>
                 <div className="muted">{z.questionCount} 題{z.dueDate ? ' · 截止 ' + z.dueDate : ''}</div>
                 <div className="row" style={{ marginTop: 10, justifyContent: 'space-between' }}>

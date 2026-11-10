@@ -68,13 +68,18 @@ function splitKeywords(refText) {
     .filter(Boolean);
 }
 
+// 替已交卷但缺少某些題目作答紀錄的學生補上空白作答（0 分）。後面要自己接 WHERE 與 ON CONFLICT。
+const FILL_MISSING_ANSWERS = `
+  INSERT INTO question_answers (quiz_submission_id, question_id, content, score, status)
+  SELECT s.id, q.id, CASE WHEN q.type = 'multiple' THEN '[]' ELSE '""' END, 0, 'graded'
+  FROM quiz_submissions s JOIN questions q ON q.quiz_id = s.quiz_id`;
+
 // 自動批改：
 // - 單選：全對 100，全錯 0
 // - 多選：按比例給分——選對一個正解得 (100/正解數)，多選一個錯的就倒扣同樣比例，最低 0 分
 //   例：4 個正解，選對 1 個 = 25 分；選對 2 個 = 50 分；選對 2 個又多選 1 個錯的 = 25 分
-// - 簡答：老師若有設「標準答案」關鍵字，學生作答只要包含任一關鍵字就直接給 100 分；
-//   沒對到關鍵字，或老師根本沒設標準答案，回傳 null 交由老師人工批改（不會因為關鍵字沒對到就自動判 0，
-//   避免用詞不同但答對的學生被誤判）
+// - 簡答：這裡只做關鍵字比對——作答包含任一關鍵字給 100 分，否則 0 分（沒設關鍵字也是 0 分）。
+//   有 AI 可用時，這個分數只是備用：實際分數由 AI 判讀意思後決定（見交卷流程與 generateOne）。
 // 呼叫前請先用 normalizeAnswer() 把學生作答整理成固定格式。
 function autoGrade(type, answerKey, content) {
   if (type === 'single') {
@@ -92,12 +97,10 @@ function autoGrade(type, answerKey, content) {
     return Math.min(100, Math.max(0, Math.round(raw * 10) / 10));
   }
   if (type === 'short') {
-    // 空白作答直接 0 分，不用佔老師的待批改清單
     if (!content) return 0;
     const keywords = splitKeywords(parse(answerKey, '')).map(foldText).filter(Boolean);
-    if (keywords.length === 0) return null;
     const studentAns = foldText(content);
-    return keywords.some((k) => studentAns.includes(k)) ? 100 : null;
+    return keywords.some((k) => studentAns.includes(k)) ? 100 : 0;
   }
   return null;
 }
@@ -252,7 +255,11 @@ app.get('/api/dashboard', auth, wrap(async (req, res) => {
            JOIN quiz_submissions s ON s.id = qa.quiz_submission_id
            JOIN quizzes z ON z.id = s.quiz_id
            JOIN classes c ON c.id = z.class_id
-           WHERE c.teacher_id = $1 AND qa.status != 'graded') AS pending_grading_count
+           WHERE c.teacher_id = $1 AND qa.status != 'graded') AS pending_grading_count,
+        (SELECT COUNT(*) FROM quiz_submissions s
+           JOIN quizzes z ON z.id = s.quiz_id
+           JOIN classes c ON c.id = z.class_id
+           WHERE c.teacher_id = $1) AS submission_count
     `, [req.user.id]);
     const r = rows[0];
     return res.json({
@@ -260,6 +267,7 @@ app.get('/api/dashboard', auth, wrap(async (req, res) => {
       studentCount: Number(r.student_count),
       quizCount: Number(r.quiz_count),
       pendingGradingCount: Number(r.pending_grading_count),
+      submissionCount: Number(r.submission_count),
     });
   }
   const { rows } = await pool.query(`
@@ -617,13 +625,10 @@ app.put('/api/quizzes/:id', auth, requireRole('teacher'), wrap(async (req, res) 
       await client.query('DELETE FROM questions WHERE id = ANY($1::int[])', [removedIds]);
     }
 
-    // 新增了題目的話，已經交過卷的學生就少答了這一題：把他們的整份測驗狀態退回「待批改」，
-    // 不然分數計算會因為新題目沒有作答紀錄而卡在 null，畫面顯示會壞掉。
+    // 新增了題目的話，已經交過卷的學生就少答了這一題：替他們補一筆空白作答（0 分），
+    // 整份的分數才算得出來。學生可以重新作答把新題目補上。
     if (addedNewQuestion) {
-      await client.query(
-        `UPDATE quiz_submissions SET status = 'submitted', graded_at = NULL WHERE quiz_id = $1 AND status = 'graded'`,
-        [z.id]
-      );
+      await client.query(`${FILL_MISSING_ANSWERS} WHERE s.quiz_id = $1 ON CONFLICT DO NOTHING`, [z.id]);
     }
 
     await client.query('COMMIT');
@@ -747,11 +752,11 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
     for (const q of questionsRes.rows) {
       const content = normalizeAnswer(q, submitted.get(q.id));
       let score = autoGrade(q.type, q.answer_key, content);
-      // 簡答題對到關鍵字不代表答對（例如「不是葉綠素」也含有關鍵字）。
-      // 有 AI 可用時先不給分，把關鍵字的分數暫存在 ai_hold，等 AI 判讀：
-      // 判定正確才正式給分；判定不正確就留給老師批改；AI 失敗則退回關鍵字的結果。
+      // 簡答題有寫內容、而且有 AI 可用時，分數交給 AI 判讀（關鍵字看不懂「不是葉綠素」這種否定句，
+      // 也看不出換個說法的正確答案）。先把關鍵字的分數暫存在 ai_hold，AI 判讀完才正式給分；
+      // AI 失敗或超過每日上限時，就用這個暫存的關鍵字分數。
       let hold = null;
-      if (q.type === 'short' && score === 100 && aiWillJudge(req.user)) { hold = score; score = null; }
+      if (q.type === 'short' && content && aiWillJudge(req.user)) { hold = score; score = null; }
       if (score === null) allGraded = false;
       await client.query(`
         INSERT INTO question_answers (quiz_submission_id, question_id, content, score, status, ai_hold)
@@ -823,6 +828,28 @@ async function sendSubmissionEvent(subId, event) {
 // ---------- AI 小老師 ----------
 const DEMO_STUDENT_EMAIL = 'demo.student@demo.com';
 const AI_CONCURRENCY = 3;
+// AI 判讀結果對應的簡答題分數
+const VERDICT_SCORE = { correct: 100, partial: 50, incorrect: 0 };
+
+// 伺服器啟動時收尾：分數已改成自動給（AI 或關鍵字），不再有「等老師批改」的題目。
+// 還沒有分數的作答（舊版留下的待批改，或 AI 判讀到一半伺服器就重啟）在這裡補上分數：
+// 有 AI 判讀結果就照判讀，否則用暫存的關鍵字分數，都沒有就是 0 分。
+async function settleLeftovers() {
+  await pool.query(`${FILL_MISSING_ANSWERS} ON CONFLICT DO NOTHING`);
+  const { rowCount } = await pool.query(`
+    UPDATE question_answers SET
+      score = COALESCE(CASE ai_verdict WHEN 'correct' THEN 100 WHEN 'partial' THEN 50 WHEN 'incorrect' THEN 0 END, ai_hold, 0),
+      status = 'graded', ai_hold = NULL,
+      ai_status = CASE WHEN ai_status = 'pending' THEN 'failed' ELSE ai_status END
+    WHERE status <> 'graded' OR ai_status = 'pending'
+  `);
+  await pool.query(`
+    UPDATE quiz_submissions s SET status = 'graded', graded_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
+    WHERE s.status = 'submitted'
+      AND NOT EXISTS (SELECT 1 FROM question_answers qa WHERE qa.quiz_submission_id = s.id AND qa.status <> 'graded')
+  `);
+  if (rowCount) console.log('已替 ' + rowCount + ' 筆未完成的作答補上分數');
+}
 
 // 這位學生的作答會不會送給 AI（有設金鑰，而且不是被關閉 AI 的示範帳號）
 const aiWillJudge = (user) => ai.aiEnabled() && !(user.email === DEMO_STUDENT_EMAIL && !ai.demoAllowed());
@@ -898,7 +925,7 @@ async function generateOne(answerId) {
   if (!row) return;
   let text = '', status = 'done', verdict = '';
   try {
-    if (row.type === 'short') {
+    if (row.type === 'short' && parse(row.content, '')) {
       // 簡答題：AI 同時判讀對錯（verdict）和寫回饋
       ({ verdict, feedback: text } = await ai.judgeShort(ai.buildUserMessage(row, parse)));
     } else {
@@ -909,16 +936,16 @@ async function generateOne(answerId) {
     status = 'failed';
   }
   // 條件包含 content：學生若在這段時間內重新作答，舊的結果不會蓋掉新的。
-  // 暫存分數（ai_hold）的處理：AI 判定正確才給分；判定不正確就維持待批改交給老師；AI 失敗則退回關鍵字的分數。
-  // 老師若已經先手動批改，ai_hold 會是 NULL，這裡就不會動到分數。
-  const giveHold = status === 'failed' || verdict === 'correct';
+  // 等 AI 判讀的題目（ai_hold 不是 NULL）在這裡正式給分：正確 100、部分正確 50、不正確 0；
+  // AI 失敗就用暫存的關鍵字分數。其他題目（選擇題、空白簡答）分數早就確定，這裡不會動。
+  const aiScore = status === 'failed' ? null : VERDICT_SCORE[verdict];
   await pool.query(`
     UPDATE question_answers SET ai_feedback = $1, ai_status = $2, ai_verdict = $5,
-      score = CASE WHEN ai_hold IS NOT NULL AND $6 THEN ai_hold ELSE score END,
-      status = CASE WHEN ai_hold IS NOT NULL AND $6 THEN 'graded' ELSE status END,
+      score = CASE WHEN ai_hold IS NOT NULL THEN COALESCE($6::real, ai_hold) ELSE score END,
+      status = CASE WHEN ai_hold IS NOT NULL THEN 'graded' ELSE status END,
       ai_hold = NULL
     WHERE id = $3 AND ai_status = 'pending' AND content = $4
-  `, [text, status, answerId, row.content, verdict, giveHold]);
+  `, [text, status, answerId, row.content, verdict, aiScore === undefined ? null : aiScore]);
   await settleSubmission(row.quiz_submission_id);
 }
 
@@ -978,8 +1005,8 @@ app.get('/api/quizzes/:id/submissions', auth, requireRole('teacher'), wrap(async
   res.json(result);
 }));
 
-// 教師一次批改一位學生整份測驗（可只送有異動的題目）
-app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(async (req, res) => {
+// 教師回饋：老師只寫文字回饋，不改分數（分數由系統與 AI 決定）
+app.post('/api/quiz-submissions/:id/feedback', auth, requireRole('teacher'), wrap(async (req, res) => {
   const subRes = await pool.query(`
     SELECT s.*, z.teacher_id FROM quiz_submissions s
     JOIN quizzes z ON z.id = s.quiz_id
@@ -989,47 +1016,21 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
   if (!sub || sub.teacher_id !== req.user.id) return res.status(403).json({ error: '權限不足' });
 
   const { answers } = req.body || {};
-  if (!Array.isArray(answers)) return res.status(400).json({ error: '缺少評分資料' });
-  // 分數必須是 0 到 100 的數字（空字串、文字、超出範圍都擋下來，避免存進 NaN 或 150 分）
+  if (!Array.isArray(answers)) return res.status(400).json({ error: '缺少回饋資料' });
+  let changed = 0;
   for (const a of answers) {
-    const n = a && a.score !== null && a.score !== '' && typeof a.score !== 'boolean' ? Number(a.score) : NaN;
-    if (!a || !Number.isFinite(n) || n < 0 || n > 100) {
-      return res.status(400).json({ error: '分數必須是 0 到 100 之間的數字' });
-    }
-    a.score = Math.round(n * 10) / 10;
-  }
-
-  let becameGraded = false;
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-    for (const a of answers) {
-      await client.query(
-        `UPDATE question_answers SET score = $1, feedback = $2, status = 'graded', ai_hold = NULL WHERE id = $3 AND quiz_submission_id = $4`,
-        [a.score, String(a.feedback || '').slice(0, 2000), a.answerId, sub.id]
-      );
-    }
-    const remainRes = await client.query(
-      `SELECT COUNT(*) AS n FROM question_answers WHERE quiz_submission_id = $1 AND status != 'graded'`,
-      [sub.id]
+    if (!a || typeof a !== 'object') continue;
+    const r = await pool.query(
+      `UPDATE question_answers SET feedback = $1 WHERE id = $2 AND quiz_submission_id = $3 AND feedback <> $1`,
+      [String(a.feedback || '').trim().slice(0, 2000), Number(a.answerId) || 0, sub.id]
     );
-    if (Number(remainRes.rows[0].n) === 0) {
-      await client.query(
-        `UPDATE quiz_submissions SET status = 'graded', graded_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = $1`,
-        [sub.id]
-      );
-      becameGraded = sub.status !== 'graded'; // 已批改完成的作答再次存檔，不重複寄信
-    }
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
+    changed += r.rowCount;
   }
-  res.json({ ok: true });
-  // 整份批改完成才通知學生（老師只是中途存檔不會寄信）
-  if (becameGraded) sendSubmissionEvent(sub.id, 'quiz.graded').catch((e) => console.error('通知失敗：', e.message));
+  res.json({ ok: true, changed });
+  // 回饋有變動、而且這份作答已經有分數時，通知學生來看
+  if (changed && sub.status === 'graded') {
+    sendSubmissionEvent(sub.id, 'quiz.graded').catch((e) => console.error('通知失敗：', e.message));
+  }
 }));
 
 // 教師重置某位學生的某份作答：刪掉作答明細（含分數、老師回饋、AI 回饋）與交卷紀錄，學生回到「未作答」
@@ -1250,6 +1251,9 @@ async function start() {
   } catch (e) {
     // 試玩資料建不起來不影響正式功能，記一筆就好，不要讓伺服器起不來
     console.error('建立試玩帳號/示範資料失敗（不影響其他功能）：', e.message);
+  }
+  if (String(process.env.SETTLE_ON_START || '').toLowerCase() !== 'off') {
+    await settleLeftovers().catch((e) => console.error('補分數失敗（不影響其他功能）：', e.message));
   }
   app.listen(PORT, () => console.log(`教學平台執行中： http://localhost:${PORT}`));
 }
