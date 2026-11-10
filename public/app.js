@@ -346,6 +346,16 @@ function Dashboard({ user, stats, mission, mascot }) {
 // 教師端
 // ========================================================================
 
+// 每隔幾秒自動重新載入一次（分頁在背景時暫停），讓老師不用手動重新整理就看到新學生、新作答
+function useAutoRefresh(fn, ms = 8000) {
+  const ref = useRef(fn);
+  ref.current = fn;
+  useEffect(() => {
+    const t = setInterval(() => { if (!document.hidden) { Promise.resolve(ref.current()).catch(() => {}); } }, ms);
+    return () => clearInterval(t);
+  }, [ms]);
+}
+
 function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
   const [classes, setClasses] = useState([]);
   const [stats, setStats] = useState(null);
@@ -355,6 +365,7 @@ function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
 
   const load = useCallback(() => api('/classes').then(setClasses), []);
   useEffect(() => { load(); api('/dashboard').then(setStats); }, [load]);
+  useAutoRefresh(() => Promise.all([load(), api('/dashboard').then(setStats)]));
 
   const createClass = async (e) => {
     e.preventDefault();
@@ -720,6 +731,7 @@ function TeacherQuizDetail({ quiz, onBack, backLabel = '返回課程' }) {
   const [subs, setSubs] = useState(null);
   const load = useCallback(() => api('/quizzes/' + quiz.id + '/submissions').then(setSubs), [quiz.id]);
   useEffect(() => { load(); }, [load]);
+  useAutoRefresh(load);
 
   return (
     <div>
@@ -865,6 +877,7 @@ function TeacherGrading({ cls, onBack }) {
   const [selectedQuiz, setSelectedQuiz] = useState(null);
   const load = useCallback(() => api('/classes/' + cls.id + '/quizzes').then(setList), [cls.id]);
   useEffect(() => { load(); }, [load]);
+  useAutoRefresh(load);
 
   if (selectedQuiz) {
     return (
@@ -919,6 +932,16 @@ function TeacherManage({ cls, onBack }) {
 
   useEffect(() => { loadRoster(); }, [loadRoster]);
   useEffect(() => { loadAttendance(); setSaved(false); }, [loadAttendance]);
+  // 自動更新名單：新加入的學生補進點名表，已經勾好但還沒儲存的點名不會被蓋掉
+  useAutoRefresh(async () => {
+    await loadRoster();
+    const d = await api('/classes/' + cls.id + '/attendance?date=' + date);
+    setAttendance((cur) => {
+      const have = new Set(cur.map((r) => r.studentId));
+      const keep = new Set(d.roster.map((r) => r.studentId));
+      return [...cur.filter((r) => keep.has(r.studentId)), ...d.roster.filter((r) => !have.has(r.studentId))];
+    });
+  });
 
   const addStudent = async (e) => {
     e.preventDefault();

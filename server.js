@@ -224,6 +224,10 @@ app.post('/api/auth/register', wrap(async (req, res) => {
     [email, hashPassword(password), name, role]
   );
   const user = rows[0];
+  // 新註冊的學生預設加入示範課程與公民題庫，一登入就有島嶼和作業可以用
+  if (role === 'student') {
+    await enrollInDemoClasses(user.id).catch((e) => console.error('自動加入示範課程失敗（不影響註冊）：', e.message));
+  }
   res.json({ token: signToken({ id: user.id }), user: publicUser(user) });
 }));
 
@@ -1161,6 +1165,17 @@ async function ensureBankClass(teacher, student) {
   await pool.query(
     'INSERT INTO enrollments (class_id, student_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [cls.id, student.id]
   );
+}
+
+// 把學生加進示範老師的示範課程與公民題庫（用課程名稱找，找不到就略過；已加入不會重複）
+async function enrollInDemoClasses(studentId) {
+  if (!demoEnabled()) return;
+  await pool.query(`
+    INSERT INTO enrollments (class_id, student_id)
+    SELECT c.id, $1 FROM classes c JOIN users t ON t.id = c.teacher_id
+    WHERE t.email = $2 AND c.name = ANY($3::text[])
+    ON CONFLICT DO NOTHING
+  `, [studentId, DEMO.teacher.email, [DEMO.className, DEMO_BANK_CLASS]]);
 }
 
 // 啟動時確保試玩帳號、示範課程、示範測驗都在（刪掉了下次啟動會補回來；已存在就不動）
