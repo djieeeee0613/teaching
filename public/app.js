@@ -346,7 +346,7 @@ function Dashboard({ user, stats, mission, mascot }) {
 // 教師端
 // ========================================================================
 
-function TeacherHome({ user, onEnterCourse, onEnterManage }) {
+function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
   const [classes, setClasses] = useState([]);
   const [stats, setStats] = useState(null);
   const [name, setName] = useState('');
@@ -410,6 +410,9 @@ function TeacherHome({ user, onEnterCourse, onEnterManage }) {
           </div>
           <div className="row" style={{ marginTop: 10 }}>
             <button onClick={() => onEnterCourse(c)}>進入課程 / 出題</button>
+            <button className="ghost" onClick={() => onEnterGrading(c)}>
+              批改作答{c.pendingCount > 0 && <span className="count-badge">{c.pendingCount}</span>}
+            </button>
             <button className="ghost" onClick={() => onEnterManage(c)}>班級管理</button>
             <button className="danger" onClick={() => deleteClass(c)}>刪除課程</button>
           </div>
@@ -481,7 +484,7 @@ function QuestionEditor({ q, index, onChange, onRemove, removable }) {
           <textarea rows="2" value={q.answerText} placeholder="用逗號分開，例如：光合作用,葉綠素,二氧化碳"
             onChange={(e) => update({ answerText: e.target.value })} />
           <p className="muted" style={{ marginTop: 4 }}>
-            學生作答只要包含其中一個關鍵字，系統就會自動給 100 分；沒對到的話留給你人工批改，不會自動判 0 分。
+            學生作答只要包含其中一個關鍵字，系統就會自動給 100 分（不分大小寫、全形半形，也會忽略空白）；沒對到的話留給你人工批改，不會自動判 0 分。空白作答會直接判 0 分。
           </p>
         </>
       )}
@@ -619,9 +622,10 @@ function QuizBuilder({ classId, existingQuiz, onSaved, onCancelEdit }) {
 }
 
 function AnswerCell({ a }) {
-  if (a.type === 'short') return <span>{a.content || '（空白）'}</span>;
-  if (a.type === 'single') return <span>{a.options[a.content] ?? a.content}</span>;
-  return <span>{(a.content || []).map((i) => a.options[i]).join('、') || '（未作答）'}</span>;
+  if (a.type === 'short') return <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{a.content || '（空白）'}</span>;
+  if (a.type === 'single') return <span>{a.content === '' || a.content == null ? '（未作答）' : (a.options[a.content] ?? '（未作答）')}</span>;
+  const picked = Array.isArray(a.content) ? a.content : [];
+  return <span>{picked.map((i) => a.options[i]).filter(Boolean).join('、') || '（未作答）'}</span>;
 }
 
 // 顯示正確答案／標準答案關鍵字，以及老師寫的詳細解釋（老師批改頁、學生查看回饋頁共用）
@@ -713,14 +717,14 @@ function QuizOverview({ subs }) {
   );
 }
 
-function TeacherQuizDetail({ quiz, onBack }) {
+function TeacherQuizDetail({ quiz, onBack, backLabel = '返回課程' }) {
   const [subs, setSubs] = useState(null);
   const load = useCallback(() => api('/quizzes/' + quiz.id + '/submissions').then(setSubs), [quiz.id]);
   useEffect(() => { load(); }, [load]);
 
   return (
     <div>
-      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回課程</button>
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> {backLabel}</button>
       <h1>{quiz.title} <KindTag kind={quiz.kind} /></h1>
       {subs && subs.length > 0 && <QuizOverview subs={subs} />}
       <h2 style={{ marginTop: 20 }}>學生作答 ({subs ? subs.length : '…'})</h2>
@@ -736,6 +740,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
   ));
   const [busy, setBusy] = useState(false);
   const [collapsed, setCollapsed] = useState(false); // 收起這位學生，方便一次檢視很多人時捲動
+  const [err, setErr] = useState('');
 
   const setGrade = (answerId, patch) => setGrades((g) => ({ ...g, [answerId]: { ...g[answerId], ...patch } }));
 
@@ -745,14 +750,17 @@ function StudentSubmissionCard({ sub, onGraded }) {
     : null;
 
   const saveAll = async () => {
-    setBusy(true);
+    const answers = sub.answers
+      .filter((a) => String(grades[a.answerId].score).trim() !== '')
+      .map((a) => ({ answerId: a.answerId, seq: a.seq, score: Number(grades[a.answerId].score), feedback: grades[a.answerId].feedback }));
+    const bad = answers.find((a) => !Number.isFinite(a.score) || a.score < 0 || a.score > 100);
+    if (bad) { setErr('第 ' + bad.seq + ' 題的分數要填 0 到 100 之間的數字'); return; }
+    if (answers.length === 0) { setErr('請至少填一題的分數再儲存'); return; }
+    setErr(''); setBusy(true);
     try {
-      const answers = sub.answers
-        .filter((a) => grades[a.answerId].score !== '')
-        .map((a) => ({ answerId: a.answerId, score: Number(grades[a.answerId].score), feedback: grades[a.answerId].feedback }));
       await api('/quiz-submissions/' + sub.id + '/grade', { method: 'POST', body: { answers } });
       onGraded();
-    } finally { setBusy(false); }
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
 
   const resetSub = async () => {
@@ -813,6 +821,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
       ))}
       {!collapsed && (
         <div style={{ marginTop: 12 }}>
+          {err && <div className="err" style={{ marginBottom: 8 }}>{err}</div>}
           <button disabled={busy} onClick={saveAll}>儲存批改</button>
         </div>
       )}
@@ -822,14 +831,9 @@ function StudentSubmissionCard({ sub, onGraded }) {
 
 function TeacherCourse({ cls, onBack }) {
   const [list, setList] = useState([]);
-  const [selectedQuiz, setSelectedQuiz] = useState(null);
   const [editingQuiz, setEditingQuiz] = useState(null); // 完整測驗資料（含正解），編輯用
   const load = useCallback(() => api('/classes/' + cls.id + '/quizzes').then(setList), [cls.id]);
   useEffect(() => { load(); }, [load]);
-
-  if (selectedQuiz) {
-    return <div className="wrap"><TeacherQuizDetail quiz={selectedQuiz} onBack={() => { setSelectedQuiz(null); load(); }} /></div>;
-  }
 
   const startEdit = async (z) => setEditingQuiz(await api('/quizzes/' + z.id));
 
@@ -859,8 +863,69 @@ function TeacherCourse({ cls, onBack }) {
             <span className="tag">{z.gradedCount}/{z.submissionCount} 已批改</span>
           </div>
           <div className="row" style={{ marginTop: 10 }}>
-            <button className="ghost" onClick={() => setSelectedQuiz(z)}>查看作答 / 批改</button>
             <button className="ghost" onClick={() => startEdit(z)}>編輯題目</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 批改專用頁：從首頁課程卡片的「批改作答」進來，列出這門課每份測驗的交卷與批改進度
+function TeacherGrading({ cls, onBack }) {
+  const [list, setList] = useState(null);
+  const [selectedQuiz, setSelectedQuiz] = useState(null);
+  const [onlyPending, setOnlyPending] = useState(false);
+  const load = useCallback(() => api('/classes/' + cls.id + '/quizzes').then(setList), [cls.id]);
+  useEffect(() => { load(); }, [load]);
+
+  if (selectedQuiz) {
+    return (
+      <div className="wrap">
+        <TeacherQuizDetail quiz={selectedQuiz} backLabel="返回批改列表" onBack={() => { setSelectedQuiz(null); load(); }} />
+      </div>
+    );
+  }
+
+  const withPending = (list || []).map((z) => ({ ...z, pending: z.submissionCount - z.gradedCount }));
+  const totalPending = withPending.reduce((n, z) => n + z.pending, 0);
+  const shown = onlyPending ? withPending.filter((z) => z.pending > 0) : withPending;
+
+  return (
+    <div className="wrap">
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回首頁</button>
+      <h1>批改作答 · {cls.name}</h1>
+      <div className="card">
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span>
+            {totalPending > 0
+              ? <>還有 <strong>{totalPending}</strong> 份作答等你批改</>
+              : '目前沒有待批改的作答'}
+          </span>
+          <label className="row" style={{ margin: 0, gap: 6, cursor: 'pointer' }}>
+            <input type="checkbox" style={{ width: 'auto' }} checked={onlyPending} onChange={(e) => setOnlyPending(e.target.checked)} />
+            只看待批改
+          </label>
+        </div>
+      </div>
+      {!list && <div className="loading"><span className="spinner" /> 載入中…</div>}
+      {list && list.length === 0 && <p className="muted">這門課還沒有測驗。</p>}
+      {list && list.length > 0 && shown.length === 0 && <p className="muted">沒有待批改的測驗。</p>}
+      {shown.map((z) => (
+        <div className="card" key={z.id}>
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <div>
+              <h2>{z.title} <KindTag kind={z.kind} /></h2>
+              <div className="muted">{z.questionCount} 題 · {z.submissionCount} 人交卷 · {z.gradedCount} 份已批改</div>
+            </div>
+            <span className={'tag ' + (z.pending > 0 ? 'wait' : 'ok')}>
+              {z.pending > 0 ? '待批改 ' + z.pending : z.submissionCount > 0 ? '全部批改完成' : '尚無作答'}
+            </span>
+          </div>
+          <div className="row" style={{ marginTop: 10 }}>
+            <button className={z.pending > 0 ? '' : 'ghost'} onClick={() => setSelectedQuiz(z)}>
+              {z.pending > 0 ? '開始批改' : '查看作答'}
+            </button>
           </div>
         </div>
       ))}
@@ -980,6 +1045,9 @@ function TeacherApp({ user }) {
   if (view === 'course' && cls) {
     return <TeacherCourse cls={cls} onBack={() => setView('home')} />;
   }
+  if (view === 'grading' && cls) {
+    return <TeacherGrading cls={cls} onBack={() => setView('home')} />;
+  }
   if (view === 'manage' && cls) {
     return <TeacherManage cls={cls} onBack={() => setView('home')} />;
   }
@@ -987,6 +1055,7 @@ function TeacherApp({ user }) {
     <TeacherHome
       user={user}
       onEnterCourse={(c) => { setCls(c); setView('course'); }}
+      onEnterGrading={(c) => { setCls(c); setView('grading'); }}
       onEnterManage={(c) => { setCls(c); setView('manage'); }}
     />
   );

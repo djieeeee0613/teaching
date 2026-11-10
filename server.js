@@ -23,9 +23,13 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // process 炸掉。這裡統一補上監聽器，讓這種暫時性斷線只是記一筆 log，不會弄垮整個伺服器。
 async function getClient() {
   const client = await pool.connect();
-  client.on('error', (err) => {
-    console.error('資料庫連線中途發生錯誤（已攔截，不會讓伺服器當掉）：', err.message);
-  });
+  // 連線池會重複借出同一個 client，監聽器只要掛一次；每次借出都掛的話會越疊越多（記憶體洩漏警告）
+  if (!client.__errorHooked) {
+    client.__errorHooked = true;
+    client.on('error', (err) => {
+      console.error('資料庫連線中途發生錯誤（已攔截，不會讓伺服器當掉）：', err.message);
+    });
+  }
   return client;
 }
 
@@ -71,29 +75,65 @@ function splitKeywords(refText) {
 // - 簡答：老師若有設「標準答案」關鍵字，學生作答只要包含任一關鍵字就直接給 100 分；
 //   沒對到關鍵字，或老師根本沒設標準答案，回傳 null 交由老師人工批改（不會因為關鍵字沒對到就自動判 0，
 //   避免用詞不同但答對的學生被誤判）
+// 呼叫前請先用 normalizeAnswer() 把學生作答整理成固定格式。
 function autoGrade(type, answerKey, content) {
   if (type === 'single') {
-    return Number(content) === Number(answerKey) ? 100 : 0;
+    // content 為 '' 代表沒作答；不能直接 Number('')（會變成 0，剛好等於第一個選項）
+    return content !== '' && content === Number(parse(answerKey, -1)) ? 100 : 0;
   }
   if (type === 'multiple') {
-    const key = [...(parse(answerKey, []))].map(Number);
-    const ans = [...(parse(content, []))].map(Number);
+    const key = toIndexList(parse(answerKey, []), Infinity);
     if (key.length === 0) return 0;
     const keySet = new Set(key);
-    const correctSelected = ans.filter((a) => keySet.has(a)).length;
-    const wrongSelected = ans.filter((a) => !keySet.has(a)).length;
+    const correctSelected = content.filter((a) => keySet.has(a)).length;
+    const wrongSelected = content.length - correctSelected;
     const per = 100 / key.length;
     const raw = (correctSelected - wrongSelected) * per;
-    return Math.max(0, Math.round(raw * 10) / 10);
+    return Math.min(100, Math.max(0, Math.round(raw * 10) / 10));
   }
   if (type === 'short') {
-    const keywords = splitKeywords(parse(answerKey, ''));
+    // 空白作答直接 0 分，不用佔老師的待批改清單
+    if (!content) return 0;
+    const keywords = splitKeywords(parse(answerKey, '')).map(foldText).filter(Boolean);
     if (keywords.length === 0) return null;
-    const studentAns = String(content ?? '');
-    const matched = keywords.some((k) => studentAns.includes(k));
-    return matched ? 100 : null;
+    const studentAns = foldText(content);
+    return keywords.some((k) => studentAns.includes(k)) ? 100 : null;
   }
   return null;
+}
+
+// 比對簡答題關鍵字前先正規化：全形轉半形、不分大小寫、忽略所有空白
+// （「ＤＮＡ」「dna」「葉 綠 素」都應該對得上「DNA」「葉綠素」）
+function foldText(s) {
+  return String(s ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+}
+
+// 把任意輸入整理成「不重複、合法的選項索引」陣列；不是陣列或索引超出範圍的都丟掉
+function toIndexList(value, optionCount) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const v of value) {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : NaN);
+    if (Number.isInteger(n) && n >= 0 && n < optionCount && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+const MAX_SHORT_ANSWER = 2000;
+
+// 學生送來的作答不能直接相信（可能是空的、型別錯、重複勾選、亂填索引），統一整理成：
+//   單選：合法的選項索引（數字），沒作答或不合法 = ''
+//   多選：不重複且合法的索引陣列
+//   簡答：去頭尾空白的字串，最長 MAX_SHORT_ANSWER 字
+function normalizeAnswer(q, content) {
+  const optionCount = parse(q.options, []).length;
+  if (q.type === 'single') {
+    const one = toIndexList([content], optionCount);
+    return one.length ? one[0] : '';
+  }
+  if (q.type === 'multiple') return toIndexList(content, optionCount);
+  if (typeof content !== 'string' && typeof content !== 'number') return '';
+  return String(content).trim().slice(0, MAX_SHORT_ANSWER);
 }
 
 async function generateJoinCode() {
@@ -115,6 +155,7 @@ function shapeClass(c) {
     studentCount: c.student_count != null ? Number(c.student_count) : undefined,
     quizCount: c.quiz_count != null ? Number(c.quiz_count) : undefined,
     completedCount: c.completed_count != null ? Number(c.completed_count) : undefined,
+    pendingCount: c.pending_count != null ? Number(c.pending_count) : undefined,
   };
 }
 
@@ -261,7 +302,9 @@ app.get('/api/classes', auth, wrap(async (req, res) => {
     const { rows } = await pool.query(`
       SELECT c.*,
         (SELECT COUNT(*) FROM enrollments e WHERE e.class_id = c.id) AS student_count,
-        (SELECT COUNT(*) FROM quizzes z WHERE z.class_id = c.id) AS quiz_count
+        (SELECT COUNT(*) FROM quizzes z WHERE z.class_id = c.id) AS quiz_count,
+        (SELECT COUNT(*) FROM quiz_submissions s JOIN quizzes z ON z.id = s.quiz_id
+           WHERE z.class_id = c.id AND s.status = 'submitted') AS pending_count
       FROM classes c
       WHERE c.teacher_id = $1
       ORDER BY c.created_at DESC
@@ -673,8 +716,15 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
   if (!Array.isArray(answers) || answers.length === 0) {
     return res.status(400).json({ error: '缺少作答內容' });
   }
-  const questionsRes = await pool.query('SELECT * FROM questions WHERE quiz_id = $1', [z.id]);
-  const qMap = new Map(questionsRes.rows.map((q) => [q.id, q]));
+  const questionsRes = await pool.query('SELECT * FROM questions WHERE quiz_id = $1 ORDER BY seq', [z.id]);
+  const questionIds = new Set(questionsRes.rows.map((q) => q.id));
+  // 只收屬於這份測驗的題目；questionId 可能是字串，同一題送兩次以最後一次為準
+  const submitted = new Map();
+  for (const a of answers) {
+    const qid = a && typeof a === 'object' ? Number(a.questionId) : NaN;
+    if (questionIds.has(qid)) submitted.set(qid, a.content);
+  }
+  if (submitted.size === 0) return res.status(400).json({ error: '缺少作答內容' });
 
   let subId;
   const client = await getClient();
@@ -692,17 +742,18 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
     subId = subRes.rows[0].id;
 
     let allGraded = true;
-    for (const a of answers) {
-      const q = qMap.get(a.questionId);
-      if (!q) continue;
-      const score = autoGrade(q.type, q.answer_key, a.content);
+    // 每一題都要有一筆作答紀錄：沒送來的題目當成空白作答（0 分），
+    // 這樣整份測驗的分數、批改狀態才算得出來，不會出現「已批改卻沒有分數」
+    for (const q of questionsRes.rows) {
+      const content = normalizeAnswer(q, submitted.get(q.id));
+      const score = autoGrade(q.type, q.answer_key, content);
       if (score === null) allGraded = false;
       await client.query(`
         INSERT INTO question_answers (quiz_submission_id, question_id, content, score, status)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (quiz_submission_id, question_id) DO UPDATE SET
           content = $3, score = $4, status = $5, feedback = '', ai_feedback = '', ai_status = ''
-      `, [subId, q.id, JSON.stringify(a.content ?? ''), score, score === null ? 'submitted' : 'graded']);
+      `, [subId, q.id, JSON.stringify(content), score, score === null ? 'submitted' : 'graded']);
     }
     if (allGraded) {
       await client.query(
@@ -897,6 +948,14 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
 
   const { answers } = req.body || {};
   if (!Array.isArray(answers)) return res.status(400).json({ error: '缺少評分資料' });
+  // 分數必須是 0 到 100 的數字（空字串、文字、超出範圍都擋下來，避免存進 NaN 或 150 分）
+  for (const a of answers) {
+    const n = a && a.score !== null && a.score !== '' && typeof a.score !== 'boolean' ? Number(a.score) : NaN;
+    if (!a || !Number.isFinite(n) || n < 0 || n > 100) {
+      return res.status(400).json({ error: '分數必須是 0 到 100 之間的數字' });
+    }
+    a.score = Math.round(n * 10) / 10;
+  }
 
   let becameGraded = false;
   const client = await getClient();
@@ -905,7 +964,7 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
     for (const a of answers) {
       await client.query(
         `UPDATE question_answers SET score = $1, feedback = $2, status = 'graded' WHERE id = $3 AND quiz_submission_id = $4`,
-        [Number(a.score), a.feedback || '', a.answerId, sub.id]
+        [a.score, String(a.feedback || '').slice(0, 2000), a.answerId, sub.id]
       );
     }
     const remainRes = await client.query(
