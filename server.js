@@ -5,6 +5,7 @@ const express = require('express');
 const { pool, init } = require('./db');
 const { hashPassword, verifyPassword, signToken, verifyToken } = require('./auth');
 const ai = require('./ai');
+const { notify } = require('./notify');
 
 const app = express();
 app.use(express.json());
@@ -164,6 +165,9 @@ app.post('/api/auth/register', wrap(async (req, res) => {
   const { email, password, name, role } = req.body || {};
   if (!email || !password || !name || !['teacher', 'student'].includes(role)) {
     return res.status(400).json({ error: '請填寫 email、密碼、姓名，並選擇身分' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email))) {
+    return res.status(400).json({ error: '請輸入正確的 email 格式（系統會寄成績通知到這個信箱）' });
   }
   if (String(password).length < 6) {
     return res.status(400).json({ error: '密碼至少 6 碼' });
@@ -716,7 +720,49 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
   }
   // 回應已送出，AI 回饋在背景產生；失敗只記 log，不影響學生交卷
   startAiFeedback(subId, req.user).catch((e) => console.error('AI 回饋啟動失敗：', e.message));
+  sendSubmissionEvent(subId, 'quiz.submitted').catch((e) => console.error('通知失敗：', e.message));
 }));
+
+// 把一份作答整理成通知內容送給 n8n（n8n 再寄 email 給 student.email）。
+// 分數只有在整份都批改完成時才有值（選擇題自動批改完、簡答題可能還在等老師）。
+async function sendSubmissionEvent(subId, event) {
+  const { rows } = await pool.query(`
+    SELECT s.status, s.submitted_at, s.graded_at, z.title AS quiz_title, z.kind, c.name AS class_name,
+           u.name AS student_name, u.email AS student_email, t.name AS teacher_name
+    FROM quiz_submissions s
+    JOIN quizzes z ON z.id = s.quiz_id
+    JOIN classes c ON c.id = z.class_id
+    JOIN users u ON u.id = s.student_id
+    JOIN users t ON t.id = z.teacher_id
+    WHERE s.id = $1
+  `, [subId]);
+  const s = rows[0];
+  if (!s) return;
+  const ansRes = await pool.query(`
+    SELECT qa.score, qa.feedback, q.seq, q.description
+    FROM question_answers qa JOIN questions q ON q.id = qa.question_id
+    WHERE qa.quiz_submission_id = $1 ORDER BY q.seq
+  `, [subId]);
+  const answers = ansRes.rows;
+  const allGraded = s.status === 'graded' && answers.length > 0;
+  const score = allGraded
+    ? Math.round((answers.reduce((sum, a) => sum + Number(a.score || 0), 0) / answers.length) * 10) / 10
+    : null;
+  await notify(event, {
+    student: { name: s.student_name, email: s.student_email },
+    teacher: { name: s.teacher_name },
+    class: { name: s.class_name },
+    quiz: { title: s.quiz_title, kind: s.kind },
+    status: s.status,
+    score,
+    submittedAt: s.submitted_at,
+    gradedAt: s.graded_at,
+    questionCount: answers.length,
+    answers: allGraded
+      ? answers.map((a) => ({ seq: a.seq, question: a.description, score: a.score, teacherFeedback: a.feedback || '' }))
+      : [],
+  });
+}
 
 // ---------- AI 小老師 ----------
 const DEMO_STUDENT_EMAIL = 'demo.student@demo.com';
@@ -852,6 +898,7 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
   const { answers } = req.body || {};
   if (!Array.isArray(answers)) return res.status(400).json({ error: '缺少評分資料' });
 
+  let becameGraded = false;
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -870,6 +917,7 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
         `UPDATE quiz_submissions SET status = 'graded', graded_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = $1`,
         [sub.id]
       );
+      becameGraded = sub.status !== 'graded'; // 已批改完成的作答再次存檔，不重複寄信
     }
     await client.query('COMMIT');
   } catch (e) {
@@ -879,6 +927,8 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
     client.release();
   }
   res.json({ ok: true });
+  // 整份批改完成才通知學生（老師只是中途存檔不會寄信）
+  if (becameGraded) sendSubmissionEvent(sub.id, 'quiz.graded').catch((e) => console.error('通知失敗：', e.message));
 }));
 
 // 教師重置某位學生的某份作答：刪掉作答明細（含分數、老師回饋、AI 回饋）與交卷紀錄，學生回到「未作答」

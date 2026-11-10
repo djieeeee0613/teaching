@@ -1,0 +1,17 @@
+{
+  "event": "quiz.graded",
+  "sentAt": "2026-11-10T03:46:10.183Z",
+  "student": { "name": "王小明", "email": "student@example.com" },
+  "teacher": { "name": "陳老師" },
+  "class": { "name": "公民與社會" },
+  "quiz": { "title": "第一章 小測驗", "kind": "normal" },
+  "status": "graded",
+  "score": 90,
+  "submittedAt": "2026-11-10 03:46:05",
+  "gradedAt": "2026-11-10 03:46:08",
+  "questionCount": 2,
+  "answers": [
+    { "seq": 1, "question": "題目一", "score": 100, "teacherFeedback": "" },
+    { "seq": 2, "question": "題目二", "score": 80, "teacherFeedback": "不錯，再補充一個例子會更好" }
+  ]
+}

@@ -1,0 +1,133 @@
+{
+  "name": "教學平台 - 作業完成與批改通知",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "teaching-platform",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "接收平台通知",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 200],
+      "webhookId": "teaching-platform"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
+              "rightValue": "把這裡改成你在 Render 設的 N8N_WEBHOOK_SECRET",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "驗證密鑰（沒設 SECRET 可刪掉此節點）",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [240, 200]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "quiz.submitted",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "學生完成作答"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "quiz.graded",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "老師批改完成"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "依事件分流",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [480, 180]
+    },
+    {
+      "parameters": {
+        "fromEmail": "把這裡改成你的寄件信箱",
+        "toEmail": "={{ $json.body.student.email }}",
+        "subject": "={{ $json.body.student.name }}，你已完成「{{ $json.body.quiz.title }}」",
+        "emailFormat": "text",
+        "text": "={{ $json.body.student.name }} 你好，\n\n你在「{{ $json.body.class.name }}」的測驗「{{ $json.body.quiz.title }}」已經送出（{{ $json.body.submittedAt }}）。\n\n{{ $json.body.score !== null ? '目前成績：' + $json.body.score + ' 分。' : '老師批改完成後會再通知你。' }}\n\n登入平台就能看到解答和 AI 小老師的建議。\n\n教學平台",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "寄信：已完成作答",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [760, 80]
+    },
+    {
+      "parameters": {
+        "fromEmail": "把這裡改成你的寄件信箱",
+        "toEmail": "={{ $json.body.student.email }}",
+        "subject": "={{ $json.body.student.name }}，「{{ $json.body.quiz.title }}」批改完成了",
+        "emailFormat": "text",
+        "text": "={{ $json.body.student.name }} 你好，\n\n{{ $json.body.teacher.name }} 老師已經批改完「{{ $json.body.class.name }}」的測驗「{{ $json.body.quiz.title }}」。\n\n成績：{{ $json.body.score }} 分\n\n各題結果：\n{{ $json.body.answers.map(a => '第 ' + a.seq + ' 題：' + a.score + ' 分' + (a.teacherFeedback ? '　老師回饋：' + a.teacherFeedback : '')).join('\\n') }}\n\n登入平台可以看到完整解答。\n\n教學平台",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "寄信：老師批改完成",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [760, 300]
+    }
+  ],
+  "connections": {
+    "接收平台通知": {
+      "main": [[{ "node": "驗證密鑰（沒設 SECRET 可刪掉此節點）", "type": "main", "index": 0 }]]
+    },
+    "驗證密鑰（沒設 SECRET 可刪掉此節點）": {
+      "main": [[{ "node": "依事件分流", "type": "main", "index": 0 }], []]
+    },
+    "依事件分流": {
+      "main": [
+        [{ "node": "寄信：已完成作答", "type": "main", "index": 0 }],
+        [{ "node": "寄信：老師批改完成", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}
