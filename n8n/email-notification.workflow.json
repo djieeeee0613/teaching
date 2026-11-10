@@ -12,19 +12,29 @@
       "name": "接收平台通知",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 200],
+      "position": [
+        0,
+        200
+      ],
       "webhookId": "teaching-platform"
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
           "conditions": [
             {
               "id": "c1",
               "leftValue": "={{ $json.headers['x-webhook-secret'] }}",
               "rightValue": "把這裡改成你在 Render 設的 N8N_WEBHOOK_SECRET",
-              "operator": { "type": "string", "operation": "equals" }
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
             }
           ],
           "combinator": "and"
@@ -35,7 +45,10 @@
       "name": "驗證密鑰（沒設 SECRET 可刪掉此節點）",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [240, 200]
+      "position": [
+        240,
+        200
+      ]
     },
     {
       "parameters": {
@@ -43,12 +56,19 @@
           "values": [
             {
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
                   {
                     "leftValue": "={{ $json.body.event }}",
                     "rightValue": "quiz.submitted",
-                    "operator": { "type": "string", "operation": "equals" }
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
                   }
                 ],
                 "combinator": "and"
@@ -58,12 +78,19 @@
             },
             {
               "conditions": {
-                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
                 "conditions": [
                   {
                     "leftValue": "={{ $json.body.event }}",
                     "rightValue": "quiz.graded",
-                    "operator": { "type": "string", "operation": "equals" }
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
                   }
                 ],
                 "combinator": "and"
@@ -79,55 +106,109 @@
       "name": "依事件分流",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
-      "position": [480, 180]
+      "position": [
+        480,
+        180
+      ]
     },
     {
       "parameters": {
-        "fromEmail": "把這裡改成你的寄件信箱",
-        "toEmail": "={{ $json.body.student.email }}",
+        "sendTo": "={{ $json.body.student.email }}",
         "subject": "={{ $json.body.student.name }}，你已完成「{{ $json.body.quiz.title }}」",
-        "emailFormat": "text",
-        "text": "={{ $json.body.student.name }} 你好，\n\n你在「{{ $json.body.class.name }}」的測驗「{{ $json.body.quiz.title }}」已經送出（{{ $json.body.submittedAt }}）。\n\n{{ $json.body.score !== null ? '目前成績：' + $json.body.score + ' 分。' : '老師批改完成後會再通知你。' }}\n\n登入平台就能看到解答和 AI 小老師的建議。\n\n教學平台",
-        "options": {}
+        "emailType": "text",
+        "message": "={{ $json.body.student.name }} 你好，\n\n你在「{{ $json.body.class.name }}」的測驗「{{ $json.body.quiz.title }}」已經送出（{{ $json.body.submittedAt }}）。\n\n{{ $json.body.score !== null ? '目前成績：' + $json.body.score + ' 分。' : '分數出來後會再通知你。' }}\n\n登入平台就能看到解答和 AI 小老師的建議。\n\n教學平台",
+        "options": {
+          "appendAttribution": false
+        }
       },
       "id": "a1000000-0000-4000-8000-000000000004",
       "name": "寄信：已完成作答",
-      "type": "n8n-nodes-base.emailSend",
+      "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [760, 80]
+      "position": [
+        760,
+        80
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "Gmail account"
+        }
+      }
     },
     {
       "parameters": {
-        "fromEmail": "把這裡改成你的寄件信箱",
-        "toEmail": "={{ $json.body.student.email }}",
-        "subject": "={{ $json.body.student.name }}，「{{ $json.body.quiz.title }}」批改完成了",
-        "emailFormat": "text",
-        "text": "={{ $json.body.student.name }} 你好，\n\n{{ $json.body.teacher.name }} 老師已經批改完「{{ $json.body.class.name }}」的測驗「{{ $json.body.quiz.title }}」。\n\n成績：{{ $json.body.score }} 分\n\n各題結果：\n{{ $json.body.answers.map(a => '第 ' + a.seq + ' 題：' + a.score + ' 分' + (a.teacherFeedback ? '　老師回饋：' + a.teacherFeedback : '')).join('\\n') }}\n\n登入平台可以看到完整解答。\n\n教學平台",
-        "options": {}
+        "sendTo": "={{ $json.body.student.email }}",
+        "subject": "={{ $json.body.student.name }}，「{{ $json.body.quiz.title }}」的成績出來了",
+        "emailType": "text",
+        "message": "={{ $json.body.student.name }} 你好，\n\n你在「{{ $json.body.class.name }}」的測驗「{{ $json.body.quiz.title }}」成績出來了。\n\n成績：{{ $json.body.score }} 分\n\n各題結果：\n{{ $json.body.answers.map(a => '第 ' + a.seq + ' 題：' + a.score + ' 分' + (a.teacherFeedback ? '　教師回饋：' + a.teacherFeedback : '')).join('\\n') }}\n\n登入平台可以看到完整解答和 AI 小老師的回饋。\n\n教學平台",
+        "options": {
+          "appendAttribution": false
+        }
       },
       "id": "a1000000-0000-4000-8000-000000000005",
-      "name": "寄信：老師批改完成",
-      "type": "n8n-nodes-base.emailSend",
+      "name": "寄信：成績出來了",
+      "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [760, 300]
+      "position": [
+        760,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "Gmail account"
+        }
+      }
     }
   ],
   "connections": {
     "接收平台通知": {
-      "main": [[{ "node": "驗證密鑰（沒設 SECRET 可刪掉此節點）", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "驗證密鑰（沒設 SECRET 可刪掉此節點）",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "驗證密鑰（沒設 SECRET 可刪掉此節點）": {
-      "main": [[{ "node": "依事件分流", "type": "main", "index": 0 }], []]
+      "main": [
+        [
+          {
+            "node": "依事件分流",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
     },
     "依事件分流": {
       "main": [
-        [{ "node": "寄信：已完成作答", "type": "main", "index": 0 }],
-        [{ "node": "寄信：老師批改完成", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "寄信：已完成作答",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "寄信：成績出來了",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
   "active": false,
-  "settings": { "executionOrder": "v1" },
+  "settings": {
+    "executionOrder": "v1"
+  },
   "pinData": {},
   "tags": []
 }
