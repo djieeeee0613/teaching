@@ -1,4 +1,4 @@
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ---------- API ----------
 // 用 sessionStorage（而非 localStorage）：每個分頁獨立登入狀態，
@@ -989,6 +989,97 @@ function TeacherApp({ user }) {
 // 課程 = 一座小島（有進度環）；測驗 = 地圖上的一個關卡（待挑戰會發光、通關會拿星星）。
 // ========================================================================
 
+// 海面上一座一座的島：島排成一橫列，在海上用滑鼠滾輪（往下滾）、觸控滑動、左右按鈕或下方圓點橫向切換。
+// 滾輪在海面上時會被轉成橫向捲動；捲到頭了才會繼續讓整個頁面往下捲。
+const ISLE_SHAPES = [
+  '58% 42% 55% 45% / 52% 60% 40% 48%',
+  '46% 54% 42% 58% / 58% 44% 56% 42%',
+  '60% 40% 50% 50% / 44% 56% 44% 56%',
+];
+
+function IslandSea({ classes, onEnter, onLeave }) {
+  const ref = useRef(null);
+  const [active, setActive] = useState(0);
+
+  const updateActive = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const mid = el.scrollLeft + el.clientWidth / 2;
+    let best = 0, bestDist = Infinity;
+    Array.from(el.children).forEach((ch, i) => {
+      const d = Math.abs(ch.offsetLeft + ch.offsetWidth / 2 - mid);
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    setActive(best);
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return; // 本來就是橫向手勢，交給瀏覽器
+      const max = el.scrollWidth - el.clientWidth;
+      const canGo = (e.deltaY > 0 && el.scrollLeft < max - 1) || (e.deltaY < 0 && el.scrollLeft > 1);
+      if (!canGo) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    updateActive();
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [classes.length, updateActive]);
+
+  const goTo = (i) => {
+    const el = ref.current;
+    const target = el && el.children[Math.max(0, Math.min(classes.length - 1, i))];
+    if (target) el.scrollTo({ left: target.offsetLeft + target.offsetWidth / 2 - el.clientWidth / 2, behavior: 'smooth' });
+  };
+
+  return (
+    <div className="sea-wrap">
+      <div className="sea" ref={ref} onScroll={updateActive}>
+        {classes.map((c, i) => {
+          const isl = islandOf(c);
+          const pct = c.quizCount ? Math.round((c.completedCount / c.quizCount) * 100) : 0;
+          return (
+            <div key={c.id} className={'isle-item' + (i === active ? ' active' : '')}
+              style={{ '--island-bg': isl.bg, '--isle-shape': ISLE_SHAPES[c.id % ISLE_SHAPES.length], '--drift': (i % 2 ? 14 : -6) + 'px' }}>
+              <div className="isle-label">
+                <div>
+                  <strong>{c.name}</strong>
+                  <div className="muted">{c.teacherName} 老師 · 已通關 {c.completedCount} / {c.quizCount} 關</div>
+                </div>
+                <Ring pct={pct} size={50} stroke={6}>{pct}%</Ring>
+              </div>
+              <div className="isle" role="button" tabIndex={0} aria-label={'前往課程 ' + c.name}
+                onClick={() => (i === active ? onEnter(c) : goTo(i))}
+                onKeyDown={(e) => { if (e.key === 'Enter') onEnter(c); }}>
+                <div className="isle-sand" />
+                <div className="isle-grass" />
+                <span className="isle-emoji">{isl.emoji}</span>
+                <span className="isle-go">{i === active ? '出發' : '看看'}</span>
+              </div>
+              <div className="isle-ripple" />
+              <button type="button" className="isle-leave" onClick={() => onLeave(c)}>退出這座島</button>
+            </div>
+          );
+        })}
+      </div>
+      {classes.length > 1 && (
+        <>
+          <button type="button" className="sea-arrow left" aria-label="上一座島" disabled={active === 0} onClick={() => goTo(active - 1)}>&lt;</button>
+          <button type="button" className="sea-arrow right" aria-label="下一座島" disabled={active === classes.length - 1} onClick={() => goTo(active + 1)}>&gt;</button>
+          <div className="sea-dots">
+            {classes.map((c, i) => (
+              <button key={c.id} type="button" aria-label={'第 ' + (i + 1) + ' 座島'} className={i === active ? 'on' : ''} onClick={() => goTo(i)} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function StudentHome({ user, onEnterCourse }) {
   const [classes, setClasses] = useState(null);
   const [stats, setStats] = useState(null);
@@ -1041,28 +1132,7 @@ function StudentHome({ user, onEnterCourse }) {
           <p>還沒有小島耶～跟老師拿 6 碼代碼，在下面輸入就能上島囉！</p>
         </div>
       )}
-      <div className="islands">
-        {(classes || []).map((c, i) => {
-          const isl = islandOf(c);
-          const pct = c.quizCount ? Math.round((c.completedCount / c.quizCount) * 100) : 0;
-          return (
-            <div key={c.id} className="island" style={{ '--island-bg': isl.bg, animationDelay: i * 90 + 'ms' }}
-              onClick={() => onEnterCourse(c)}>
-              <div className="island-top">
-                <span className="emoji">{isl.emoji}</span>
-                <Ring pct={pct} size={58} stroke={6}>{pct}%</Ring>
-              </div>
-              <h2>{c.name}</h2>
-              <div className="meta">{c.teacherName} 老師</div>
-              <div className="meta">已通關 {c.completedCount} / {c.quizCount} 關</div>
-              <div className="island-actions">
-                <span className="go">出發 →</span>
-                <button type="button" className="island-leave" onClick={(e) => { e.stopPropagation(); leaveClass(c); }}>退出</button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      {classes && classes.length > 0 && <IslandSea classes={classes} onEnter={onEnterCourse} onLeave={leaveClass} />}
 
       <form className="card join" onSubmit={join}>
         <h2>🧭 探索新小島</h2>

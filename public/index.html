@@ -232,6 +232,51 @@
     .ring-label { position: absolute; inset: 0; display: grid; place-items: center; font-weight: 800; font-size: 13px; }
     .big-score { font-size: 34px; font-weight: 800; }
 
+    /* 海面上的島嶼：橫向排列，滾輪往下滾會變成橫向移動 */
+    .sea-wrap { position: relative; margin-top: 12px; border-radius: 28px; overflow: hidden;
+      background: linear-gradient(180deg,#bfe9ff 0%,#7fd0f5 55%,#4fb6ea 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.55); }
+    .sea-wrap::before { content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .5;
+      background:
+        radial-gradient(ellipse 60px 10px at 12% 30%, rgba(255,255,255,.7), transparent 70%),
+        radial-gradient(ellipse 80px 10px at 38% 78%, rgba(255,255,255,.6), transparent 70%),
+        radial-gradient(ellipse 70px 10px at 66% 24%, rgba(255,255,255,.7), transparent 70%),
+        radial-gradient(ellipse 90px 10px at 88% 70%, rgba(255,255,255,.6), transparent 70%);
+      animation: seaDrift 9s ease-in-out infinite alternate; }
+    @keyframes seaDrift { from { transform: translateX(-16px); } to { transform: translateX(16px); } }
+    .sea { position: relative; display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity;
+      padding: 22px calc(50% - 150px) 46px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .sea::-webkit-scrollbar { display: none; }
+    .isle-item { flex: none; width: 300px; scroll-snap-align: center; display: flex; flex-direction: column; align-items: center;
+      transform: translateY(var(--drift)) scale(.9); opacity: .85; transition: transform .45s cubic-bezier(.22,1,.36,1), opacity .3s; }
+    .isle-item.active { transform: translateY(var(--drift)) scale(1); opacity: 1; }
+    .isle-label { display: flex; align-items: center; gap: 10px; background: rgba(255,255,255,.92); border-radius: 18px; padding: 8px 12px;
+      box-shadow: 0 6px 14px -8px rgba(0,0,0,.3); width: 100%; justify-content: space-between; }
+    .isle-label .muted { font-size: 12px; }
+    .isle { position: relative; width: 250px; height: 190px; margin-top: 10px; cursor: pointer; outline: none; }
+    .isle-sand { position: absolute; inset: 14px 0 0 0; background: #f6dfa4; border-radius: var(--isle-shape);
+      box-shadow: 0 14px 22px -10px rgba(0,60,100,.45), inset 0 -8px 0 rgba(200,150,70,.35); }
+    .isle-grass { position: absolute; inset: 0 14px 22px 14px; background: var(--island-bg); border-radius: var(--isle-shape);
+      box-shadow: inset 0 -8px 0 rgba(0,0,0,.12); transition: filter .2s; }
+    .isle:hover .isle-grass, .isle:focus-visible .isle-grass { filter: brightness(1.08); }
+    .isle:focus-visible .isle-sand { outline: 3px solid #fff; outline-offset: 2px; }
+    .isle-emoji { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); font-size: 62px; line-height: 1;
+      filter: drop-shadow(0 6px 6px rgba(0,0,0,.25)); animation: floaty 4s ease-in-out infinite; }
+    .isle-go { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); background: rgba(255,255,255,.9); color: #3a3450;
+      font-weight: 800; font-size: 13px; padding: 5px 16px; border-radius: 999px; box-shadow: 0 4px 8px -4px rgba(0,0,0,.3); }
+    .isle-ripple { width: 230px; height: 14px; margin-top: -4px; border-radius: 50%; background: radial-gradient(ellipse, rgba(255,255,255,.65), transparent 70%);
+      animation: ripple 3s ease-in-out infinite; }
+    @keyframes ripple { 0%, 100% { transform: scaleX(.9); opacity: .7; } 50% { transform: scaleX(1.08); opacity: 1; } }
+    .isle-leave { background: transparent; border: none; box-shadow: none; color: rgba(20,70,110,.7); font-size: 12px; font-weight: 600;
+      text-decoration: underline; padding: 4px 6px; margin-top: 2px; }
+    .isle-leave:hover { color: #0d3b5e; filter: none; transform: none; }
+    .sea-arrow { position: absolute; top: 50%; transform: translateY(-50%); width: 40px; height: 40px; border-radius: 50%; padding: 0;
+      background: rgba(255,255,255,.92); color: #3a3450; font-size: 18px; font-weight: 800; box-shadow: 0 6px 12px -6px rgba(0,0,0,.4); z-index: 2; }
+    .sea-arrow.left { left: 10px; } .sea-arrow.right { right: 10px; }
+    .sea-arrow:disabled { opacity: .35; cursor: default; }
+    .sea-dots { position: absolute; left: 0; right: 0; bottom: 12px; display: flex; justify-content: center; gap: 8px; z-index: 2; }
+    .sea-dots button { width: 10px; height: 10px; padding: 0; border-radius: 50%; background: rgba(255,255,255,.55); box-shadow: none; transition: width .25s, background .25s; }
+    .sea-dots button.on { width: 26px; border-radius: 999px; background: #fff; }
+
     .empty { text-align: center; padding: 30px 20px; }
     .empty p { margin: 8px 0 0; color: var(--muted); }
     .join { margin-top: 22px; }
@@ -310,6 +355,10 @@
       .quest::before { left: 27px; }
       .quest-row { gap: 10px; }
       .islands { grid-template-columns: 1fr; }
+      .isle-item { width: 260px; }
+      .sea { padding-left: calc(50% - 130px); padding-right: calc(50% - 130px); }
+      .isle { width: 220px; height: 170px; }
+      .sea-arrow { display: none; }
     }
 
     /* 有些人開了「減少動態效果」，尊重他們的設定：動畫幾乎直接跳到結果 */
