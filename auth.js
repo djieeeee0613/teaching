@@ -15,7 +15,7 @@ function loadOrCreateSecret() {
   } catch {
     const generated = crypto.randomBytes(32).toString('hex');
     fs.writeFileSync(secretFile, generated, { mode: 0o600 });
-    console.warn('⚠️  未設定 SECRET 環境變數，已自動產生本機用密鑰於 .secret（正式部署請改用環境變數）。');
+    console.warn('注意：未設定 SECRET 環境變數，已自動產生本機用密鑰於 .secret（正式部署請改用環境變數）。');
     return generated;
   }
 }

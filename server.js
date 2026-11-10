@@ -1002,7 +1002,7 @@ const DEMO = {
   password: 'demo1234',
   teacher: { email: 'demo.teacher@demo.com', name: '示範老師' },
   student: { email: 'demo.student@demo.com', name: '示範同學' },
-  className: '🌟 示範課程：自然小學堂',
+  className: '示範課程：自然小學堂',
 };
 const demoEnabled = () => String(process.env.DEMO_ACCOUNTS || '').toLowerCase() !== 'off';
 
@@ -1030,7 +1030,7 @@ async function insertDemoQuizzes(client, classId, teacherId, quizzes) {
 }
 
 // 第二門示範課程：「公民與社會題庫」——40 題，依 6 個章節各一份測驗（資料在 demo_quiz_bank.json）
-const DEMO_BANK_CLASS = '📚 公民與社會題庫（40 題）';
+const DEMO_BANK_CLASS = '公民與社會題庫（40 題）';
 async function ensureBankClass(teacher, student) {
   let quizzes;
   try { quizzes = require('./demo_quiz_bank.json'); } catch { return; }
@@ -1076,6 +1076,14 @@ async function ensureDemoData() {
   const student = await ensureUser(DEMO.student, 'student');
   // 帳號若被別人佔用成其他身分就不要硬塞資料
   if (teacher.role !== 'teacher' || student.role !== 'student') return;
+
+  // 舊版的示範課程名稱開頭帶有表情符號，改名成純文字（只做一次；改過之後就找不到舊名稱了）
+  for (const name of [DEMO.className, DEMO_BANK_CLASS]) {
+    await pool.query(
+      'UPDATE classes SET name = $1 WHERE teacher_id = $2 AND name <> $1 AND name LIKE $3',
+      [name, teacher.id, '% ' + name]
+    );
+  }
 
   let cls = (await pool.query(
     'SELECT * FROM classes WHERE teacher_id = $1 AND name = $2', [teacher.id, DEMO.className]

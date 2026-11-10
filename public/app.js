@@ -1,5 +1,13 @@
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
+// 圖示：Phosphor Icons（MIT），SVG 內容放在 icons.js 的 window.PH_ICONS。顏色跟著文字顏色（currentColor）。
+function Icon({ name, size = '1.2em', className = '', style }) {
+  return (
+    <svg className={'icon ' + className} viewBox="0 0 256 256" width={size} height={size} fill="currentColor" aria-hidden="true"
+      style={style} dangerouslySetInnerHTML={{ __html: (window.PH_ICONS || {})[name] || '' }} />
+  );
+}
+
 // ---------- API ----------
 // 用 sessionStorage（而非 localStorage）：每個分頁獨立登入狀態，
 // 這樣同一瀏覽器開多分頁分別測試教師 / 學生身分時不會互相覆蓋 token。
@@ -49,7 +57,7 @@ function shuffled(arr) {
 function DemoHint({ acc, pw }) {
   return (
     <div className="demo-mini" onClick={(e) => e.stopPropagation()}>
-      <div>🎮 試玩帳號</div>
+      <div><Icon name="game-controller" /> 試玩帳號</div>
       <code>{acc.email}</code>
       <code>{pw}</code>
     </div>
@@ -63,13 +71,13 @@ function RolePicker({ onPick, demo }) {
       <p className="muted">請先選擇你的身份</p>
       <div className="row" style={{ marginTop: 16, alignItems: 'stretch' }}>
         <div className="card role-card" style={{ flex: 1, marginTop: 0 }} onClick={() => onPick('teacher')}>
-          <div style={{ fontSize: 34 }}>🧑‍🏫</div>
+          <div className="role-icon teacher"><Icon name="chalkboard-teacher" size={44} /></div>
           <h2 style={{ marginTop: 10 }}>我是老師</h2>
           <p className="muted">建立課程、出題、批改、點名</p>
           {demo && demo.enabled && <DemoHint acc={demo.teacher} pw={demo.password} />}
         </div>
         <div className="card role-card" style={{ flex: 1, marginTop: 0 }} onClick={() => onPick('student')}>
-          <div style={{ fontSize: 34 }}>🎓</div>
+          <div className="role-icon student"><Icon name="student" size={44} /></div>
           <h2 style={{ marginTop: 10 }}>我是學生</h2>
           <p className="muted">加入課程、作答、看老師回饋</p>
           {demo && demo.enabled && <DemoHint acc={demo.student} pw={demo.password} />}
@@ -114,7 +122,7 @@ function AuthScreen({ onLogin }) {
       <h1>教學練習平台</h1>
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <span className={'tag ' + (role === 'teacher' ? 'pre' : 'post')}>
-          {role === 'teacher' ? '🧑‍🏫 教師身份' : '🎓 學生身份'}
+          <Icon name={role === 'teacher' ? 'chalkboard-teacher' : 'student'} /> {role === 'teacher' ? '教師身份' : '學生身份'}
         </span>
         <button type="button" className="ghost" onClick={() => setRole(null)}>切換身份</button>
       </div>
@@ -136,7 +144,7 @@ function AuthScreen({ onLogin }) {
 
       {demoAcc && (
         <div className="card demo-box">
-          <div className="demo-title">🎮 不想註冊？用試玩帳號直接體驗</div>
+          <div className="demo-title"><Icon name="game-controller" /> 不想註冊？用試玩帳號直接體驗</div>
           <div className="demo-row"><span>Email</span><code>{demoAcc.email}</code></div>
           <div className="demo-row"><span>密碼</span><code>{demo.password}</code></div>
           <button type="button" className="ghost" onClick={fillDemo}>一鍵填入並切換到登入</button>
@@ -160,13 +168,13 @@ const friendlyDate = () => {
 };
 
 function weatherIcon(code) {
-  if (code === 0) return '☀️';
-  if ([1, 2, 3].includes(code)) return '⛅';
-  if ([45, 48].includes(code)) return '🌫️';
-  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return '🌧️';
-  if ([71, 73, 75, 77, 85, 86].includes(code)) return '❄️';
-  if ([95, 96, 99].includes(code)) return '⛈️';
-  return '🌤️';
+  if (code === 0) return <Icon name="sun" className="wx" />;
+  if ([1, 2, 3].includes(code)) return <Icon name="cloud-sun" className="wx" />;
+  if ([45, 48].includes(code)) return <Icon name="cloud-fog" className="wx" />;
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return <Icon name="cloud-rain" className="wx" />;
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return <Icon name="snowflake" className="wx" />;
+  if ([95, 96, 99].includes(code)) return <Icon name="cloud-lightning" className="wx" />;
+  return <Icon name="cloud-sun" className="wx" />;
 }
 
 // 免金鑰的公開天氣 API；先試瀏覽器定位，拿不到就預設台北。
@@ -262,7 +270,7 @@ function Stars({ n, total = 3, size = 20 }) {
   return (
     <span className="stars" style={{ fontSize: size }}>
       {Array.from({ length: total }, (_, i) => (
-        <span key={i} className={i < n ? '' : 'off'} style={{ '--i': i }}>⭐</span>
+        <span key={i} className={i < n ? '' : 'off'} style={{ '--i': i }}><Icon name="star-fill" size="1em" /></span>
       ))}
     </span>
   );
@@ -291,11 +299,11 @@ function Confetti() {
 
 // 每門課固定配一座「小島」的顏色跟圖示（用課程 id 取餘數，同一門課每次看到的都一樣）
 const ISLANDS = [
-  { emoji: '🏝️', bg: 'linear-gradient(135deg,#4facfe,#00c6fb)' },
-  { emoji: '🌋', bg: 'linear-gradient(135deg,#ff9a56,#ff5d8f)' },
-  { emoji: '🌳', bg: 'linear-gradient(135deg,#43e97b,#38c9a8)' },
-  { emoji: '🏰', bg: 'linear-gradient(135deg,#a18cd1,#e589c9)' },
-  { emoji: '🚀', bg: 'linear-gradient(135deg,#f6b73c,#ff8a5c)' },
+  { icon: 'tree-palm', bg: 'linear-gradient(135deg,#4facfe,#00c6fb)' },
+  { icon: 'mountains', bg: 'linear-gradient(135deg,#ff9a56,#ff5d8f)' },
+  { icon: 'tree', bg: 'linear-gradient(135deg,#43e97b,#38c9a8)' },
+  { icon: 'castle-turret', bg: 'linear-gradient(135deg,#a18cd1,#e589c9)' },
+  { icon: 'rocket-launch', bg: 'linear-gradient(135deg,#f6b73c,#ff8a5c)' },
 ];
 const islandOf = (c) => ISLANDS[c.id % ISLANDS.length];
 
@@ -306,7 +314,7 @@ function Dashboard({ user, stats, mission, mascot }) {
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'nowrap' }}>
         <div>
           <h1 style={{ color: '#fff', marginTop: 0 }}>
-            嗨，{user.name}！<span className="wave">👋</span>
+            嗨，{user.name}！<span className="wave"><Icon name="hand-waving" /></span>
           </h1>
           <p style={{ opacity: .95, margin: 0 }}>{friendlyDate()}</p>
         </div>
@@ -316,7 +324,7 @@ function Dashboard({ user, stats, mission, mascot }) {
               {weatherIcon(weather.code)} {weather.temp}°C
             </div>
           )}
-          {mascot && <span className="mascot big">🦊</span>}
+          {mascot && <span className="mascot big"><Icon name="cat" size={56} className="fox" /></span>}
         </div>
       </div>
       {mission && <div className="mission">{mission}</div>}
@@ -554,7 +562,7 @@ function QuizBuilder({ classId, existingQuiz, onSaved, onCancelEdit }) {
         reset();
       }
       onSaved();
-      setToast(isEdit ? '✅ 已更新測驗！' : '✅ 已儲存測驗！');
+      setToast(isEdit ? '已更新測驗！' : '已儲存測驗！');
       setTimeout(() => setToast(''), 3000);
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   };
@@ -712,7 +720,7 @@ function TeacherQuizDetail({ quiz, onBack }) {
 
   return (
     <div>
-      <button className="ghost" onClick={onBack}>← 返回課程</button>
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回課程</button>
       <h1>{quiz.title} <KindTag kind={quiz.kind} /></h1>
       {subs && subs.length > 0 && <QuizOverview subs={subs} />}
       <h2 style={{ marginTop: 20 }}>學生作答 ({subs ? subs.length : '…'})</h2>
@@ -761,7 +769,7 @@ function StudentSubmissionCard({ sub, onGraded }) {
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <span className="row" style={{ cursor: 'pointer' }} onClick={() => setCollapsed((c) => !c)}>
-          <span className="muted">{collapsed ? '▶' : '▼'}</span>
+          <span className="muted"><Icon name={collapsed ? 'caret-right' : 'caret-down'} /></span>
           <strong>{sub.studentName}</strong>
         </span>
         <span className="row">
@@ -827,7 +835,7 @@ function TeacherCourse({ cls, onBack }) {
 
   return (
     <div className="wrap">
-      <button className="ghost" onClick={onBack}>← 返回首頁</button>
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回首頁</button>
       <h1>{cls.name}</h1>
       <QuizBuilder
         key={editingQuiz ? 'edit-' + editingQuiz.id : 'new'}
@@ -914,7 +922,7 @@ function TeacherManage({ cls, onBack }) {
 
   return (
     <div className="wrap">
-      <button className="ghost" onClick={onBack}>← 返回首頁</button>
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回首頁</button>
       <h1>{cls.name} · 班級管理</h1>
       <p className="muted">加入代碼：<strong style={{ letterSpacing: 2 }}>{cls.joinCode}</strong>（給學生自行加入，或用下方 email 手動加入）</p>
 
@@ -1025,7 +1033,7 @@ function SceneBackdrop() {
         </div>
       </div>
       <div className="px px-near">
-        <div className="wave w1" /><div className="wave w2" /><div className="wave w3" />
+        <div className="swave w1" /><div className="swave w2" /><div className="swave w3" />
         <svg className="fish f1" viewBox="0 0 40 20"><path d="M2 10 Q12 0 26 6 L38 1 L34 10 L38 19 L26 14 Q12 20 2 10Z" /></svg>
         <svg className="fish f2" viewBox="0 0 40 20"><path d="M2 10 Q12 0 26 6 L38 1 L34 10 L38 19 L26 14 Q12 20 2 10Z" /></svg>
         {sparkles.map((s, i) => (
@@ -1070,14 +1078,14 @@ function SceneHud({ user, stats, mission, classCount, onLogout, onJoined, forceO
     <div className={'hud' + (open ? ' open' : '')}>
       {!open && (
         <button type="button" className="hud-fab" aria-label="打開選單" onClick={() => setOpen(true)}>
-          <span className="mascot">🦊</span>
+          <span className="mascot"><Icon name="cat" size={34} className="fox" /></span>
           {pending > 0 && <b className="hud-badge">{pending}</b>}
         </button>
       )}
       {open && (
         <div className="hud-body">
           <div className="hud-head">
-            <span className="mascot hud-fox">🦊</span>
+            <span className="mascot hud-fox"><Icon name="cat" size={38} className="fox" /></span>
             <div className="hud-title">
               <strong>嗨，{user.name}</strong>
               <div className="hud-sub">{friendlyDate()}{weather && <> · {weatherIcon(weather.code)} {weather.temp}°C</>}</div>
@@ -1215,7 +1223,7 @@ function IslandScene({ classes, user, stats, mission, onEnter, onLeave, onLogout
                   <div className="isle-grass" />
                   <div className="isle-hill" />
                   <span className="isle-bush b1" /><span className="isle-bush b2" />
-                  <span className="isle-emoji">{isl.emoji}</span>
+                  <span className="isle-emoji"><Icon name={isl.icon} size="1em" /></span>
                   <span className="isle-go">{here ? '出發' : '看看'}</span>
                 </div>
                 <div className="isle-ripple" />
@@ -1265,9 +1273,9 @@ function StudentHome({ user, onEnterCourse, onLogout }) {
   };
 
   const mission = !stats ? null
-    : stats.classCount === 0 ? '🧭 先輸入老師給的代碼，加入你的第一座小島吧！'
-    : stats.pendingQuizCount > 0 ? `🚩 還有 ${stats.pendingQuizCount} 個關卡等你挑戰！`
-    : '🎉 目前的關卡都通關了，太厲害了！';
+    : stats.classCount === 0 ? <><Icon name="compass" /> 先輸入老師給的代碼，加入你的第一座小島吧！</>
+    : stats.pendingQuizCount > 0 ? <><Icon name="flag" /> 還有 {stats.pendingQuizCount} 個關卡等你挑戰！</>
+    : <><Icon name="confetti" /> 目前的關卡都通關了，太厲害了！</>;
 
   if (!classes) return <div className="scene scene-loading"><div className="loading"><span className="spinner" /> 正在出海…</div></div>;
   return (
@@ -1331,7 +1339,7 @@ function QuizTaker({ quizSummary, onDone }) {
           <div className="row">
             <span className="q-badge">{i + 1}</span>
             <span className="tag">{TYPE_LABEL[q.type]}</span>
-            {isAnswered(q) && <span className="q-check">✔</span>}
+            {isAnswered(q) && <span className="q-check"><Icon name="check" /></span>}
           </div>
           <p className="q-text">{q.description}</p>
           {q.type === 'single' && q.displayOptions.map(({ text, idx }, k) => (
@@ -1364,7 +1372,7 @@ function QuizTaker({ quizSummary, onDone }) {
       ))}
       {err && <div className="err" key={err}>{err}</div>}
       <div style={{ marginTop: 18 }}>
-        <button className="big-btn" disabled={busy} onClick={submit}>{busy ? '交卷中…' : '🚀 交卷！'}</button>
+        <button className="big-btn" disabled={busy} onClick={submit}>{busy ? '交卷中…' : <><Icon name="rocket-launch" /> 交卷！</>}</button>
       </div>
     </>
   );
@@ -1421,10 +1429,13 @@ function QuizResult({ quizSummary, onRetake }) {
   const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
   const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;
   const msg = !graded ? '老師還在批改中，先來看看你的答案吧！'
-    : score >= 90 ? '太棒了！你真是小天才 🌟'
-    : score >= 60 ? '不錯喔，再接再厲 💪'
-    : '沒關係，看看解釋，下次一定更好 🌱';
-  const icon = (a) => (a.status !== 'graded' ? '⏳' : a.score >= 100 ? '✅' : a.score > 0 ? '🟡' : '❌');
+    : score >= 90 ? <>太棒了！你真是小天才 <Icon name="sparkle" /></>
+    : score >= 60 ? <>不錯喔，再接再厲 <Icon name="lightning" /></>
+    : <>沒關係，看看解釋，下次一定更好 <Icon name="plant" /></>;
+  const icon = (a) => (a.status !== 'graded' ? <Icon name="hourglass-medium" className="c-wait" />
+    : a.score >= 100 ? <Icon name="check-circle" className="c-ok" />
+    : a.score > 0 ? <Icon name="circle-half" className="c-part" />
+    : <Icon name="x-circle" className="c-bad" />);
 
   return (
     <>
@@ -1443,7 +1454,7 @@ function QuizResult({ quizSummary, onRetake }) {
         </div>
         {graded
           ? <Ring pct={score} size={104} stroke={10}><span className="big-score"><CountUp value={score} /></span></Ring>
-          : <span className="mascot big">⏳</span>}
+          : <span className="mascot big"><Icon name="hourglass-medium" size={56} /></span>}
       </div>
 
       {onRetake && (
@@ -1477,9 +1488,9 @@ const KIND_FILTERS = [
   { value: 'posttest', label: '後測' },
 ];
 const STATUS_FILTERS = [
-  { value: 'all', label: '🗺️ 全部' },
-  { value: 'todo', label: '🚩 待挑戰' },
-  { value: 'done', label: '⭐ 已通關' },
+  { value: 'all', label: '全部', icon: 'map-trifold' },
+  { value: 'todo', label: '待挑戰', icon: 'flag' },
+  { value: 'done', label: '已通關', icon: 'star-fill' },
 ];
 
 function StudentCourse({ cls, onBack }) {
@@ -1522,10 +1533,10 @@ function StudentCourse({ cls, onBack }) {
   if (taking) {
     return (
       <div className="wrap">
-        <button className="ghost" onClick={() => setTaking(null)}>← 回到地圖</button>
+        <button className="ghost" onClick={() => setTaking(null)}><Icon name="arrow-left" /> 回到地圖</button>
         <QuizTaker quizSummary={taking} onDone={() => {
           setTaking(null);
-          setFlash('🎉 闖關完成！選擇題已自動批改，簡答題等老師批改。');
+          setFlash('闖關完成！選擇題已自動批改，簡答題等老師批改。');
           setConfetti(true);
           load();
           setTimeout(() => setFlash(''), 5000);
@@ -1538,7 +1549,7 @@ function StudentCourse({ cls, onBack }) {
   if (viewing) {
     return (
       <div className="wrap">
-        <button className="ghost" onClick={() => setViewing(null)}>← 回到地圖</button>
+        <button className="ghost" onClick={() => setViewing(null)}><Icon name="arrow-left" /> 回到地圖</button>
         <QuizResult quizSummary={viewing} onRetake={() => retake(viewing)} />
       </div>
     );
@@ -1547,7 +1558,7 @@ function StudentCourse({ cls, onBack }) {
   return (
     <div className="wrap">
       {confetti && <Confetti />}
-      <button className="ghost" onClick={onBack}>← 回到我的小島</button>
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 回到我的小島</button>
 
       <div className="card hero course-hero" style={{ '--island-bg': isl.bg }}>
         <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'nowrap' }}>
@@ -1555,11 +1566,11 @@ function StudentCourse({ cls, onBack }) {
             <h1 style={{ color: '#fff', marginTop: 0 }}>{cls.name}</h1>
             <p style={{ margin: 0, opacity: .95 }}>{cls.teacherName} 老師的小島</p>
           </div>
-          <span className="emoji-xl">{isl.emoji}</span>
+          <span className="emoji-xl"><Icon name={isl.icon} size={64} /></span>
         </div>
         <div className="row" style={{ justifyContent: 'space-between', marginTop: 14 }}>
           <span>已通關 <b><CountUp value={doneCount} /></b> / {levels.length} 關</span>
-          <span>⭐ <b><CountUp value={totalStars} /></b> 顆星</span>
+          <span><Icon name="star-fill" className="c-star" /> <b><CountUp value={totalStars} /></b> 顆星</span>
         </div>
         <PBar pct={pct} />
       </div>
@@ -1570,7 +1581,7 @@ function StudentCourse({ cls, onBack }) {
         <div className="row">
           {STATUS_FILTERS.map((f) => (
             <span key={f.value} className={'chip ' + (statusFilter === f.value ? 'active' : '')}
-              onClick={() => setStatusFilter(f.value)}>{f.label}</span>
+              onClick={() => setStatusFilter(f.value)}><Icon name={f.icon} /> {f.label}</span>
           ))}
         </div>
         <div className="row">
@@ -1585,7 +1596,7 @@ function StudentCourse({ cls, onBack }) {
       {list === null && <div className="loading"><span className="spinner" /> 地圖載入中…</div>}
       {list !== null && shown.length === 0 && (
         <div className="card empty">
-          <span className="mascot big">🦊</span>
+          <span className="mascot big"><Icon name="cat" size={56} className="fox" /></span>
           <p>{levels.length === 0 ? '老師還沒有出關卡，先去別的小島逛逛吧！' : '這個條件下沒有關卡，換個篩選看看～'}</p>
         </div>
       )}
@@ -1596,7 +1607,7 @@ function StudentCourse({ cls, onBack }) {
           return (
             <div className="quest-row" key={z.id} style={{ animationDelay: i * 80 + 'ms' }}>
               <div className={'node ' + state}>
-                {state === 'todo' ? z.level : state === 'done' ? '✓' : '⏳'}
+                {state === 'todo' ? z.level : state === 'done' ? <Icon name="check" /> : <Icon name="hourglass-medium" />}
                 {z.id === nextId && <span className="bubble">下一關</span>}
               </div>
               <div className="card quest-card lift">
@@ -1609,7 +1620,7 @@ function StudentCourse({ cls, onBack }) {
                 <div className="row" style={{ marginTop: 10, justifyContent: 'space-between' }}>
                   {state === 'done' ? <Stars n={starsForScore(z.myScore)} /> : <span />}
                   {state === 'todo'
-                    ? <button onClick={() => setTaking(z)}>🚩 開始闖關</button>
+                    ? <button onClick={() => setTaking(z)}><Icon name="flag" /> 開始闖關</button>
                     : (
                       <span className="row">
                         <button className="ghost" onClick={() => setViewing(z)}>{state === 'done' ? '看成績與解答' : '看我的答案'}</button>
@@ -1654,7 +1665,7 @@ function App() {
     <>
       {!(user.role === 'student' && fullScene) && (
         <header className="bar">
-          <span className="brand"><span className="mascot-sm">🦊</span> 教學練習平台</span>
+          <span className="brand"><span className="mascot-sm"><Icon name="cat" /></span> 教學練習平台</span>
           <span className="who">
             {user.name}（{user.role === 'teacher' ? '教師' : '學生'}）
             <a href="#" onClick={(e) => { e.preventDefault(); logout(); }}>登出</a>
