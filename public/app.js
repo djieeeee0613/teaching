@@ -484,7 +484,7 @@ function QuestionEditor({ q, index, onChange, onRemove, removable }) {
           <textarea rows="2" value={q.answerText} placeholder="用逗號分開，例如：光合作用,葉綠素,二氧化碳"
             onChange={(e) => update({ answerText: e.target.value })} />
           <p className="muted" style={{ marginTop: 4 }}>
-            學生作答只要包含其中一個關鍵字，系統就會自動給 100 分（不分大小寫、全形半形，也會忽略空白）；沒對到的話留給你人工批改，不會自動判 0 分。空白作答會直接判 0 分。
+            學生作答只要包含其中一個關鍵字，系統就會自動給 100 分（不分大小寫、全形半形，也會忽略空白）；沒對到的話留給你人工批改，不會自動判 0 分。空白作答會直接判 0 分。有啟用 AI 時，對到關鍵字的答案會再由 AI 判讀意思，像「不是○○」這種否定句不會自動給分，會留給你批改。
           </p>
         </>
       )}
@@ -1453,8 +1453,11 @@ function AiNote({ a, onRetry }) {
     return <p className="ai-note"><span className="spinner" /> AI 小老師正在看你的答案…</p>;
   }
   if (a.aiStatus === 'done' && a.aiFeedback) {
+    const verdict = { correct: ['ok', 'AI 判讀：正確'], partial: ['wait', 'AI 判讀：部分正確'], incorrect: ['', 'AI 判讀：不正確'] }[a.aiVerdict];
     return (
       <p className="ai-note">
+        {/* 判讀結果只給老師看（老師端不會傳 onRetry），當作批改時的參考 */}
+        {!onRetry && verdict && <span className={'tag ' + verdict[0]} style={{ marginRight: 8 }}>{verdict[1]}</span>}
         <strong>AI 小老師：</strong>{a.aiFeedback}
         <span className="muted" style={{ display: 'block', fontSize: 12, marginTop: 4 }}>AI 的建議僅供參考，可能出錯，請以老師的說明為準。</span>
       </p>
@@ -1492,8 +1495,11 @@ function QuizResult({ quizSummary, onRetake }) {
     setDetail(await api('/quizzes/' + quizSummary.id + '/my-submission'));
   };
 
-  const graded = quizSummary.myStatus === 'graded';
-  const score = quizSummary.myScore;
+  // 簡答題可能在交卷後才由 AI 判讀完成，所以明細載入後以明細為準（明細會隨著輪詢更新）
+  const graded = detail ? detail.status === 'graded' : quizSummary.myStatus === 'graded';
+  const score = detail && graded && detail.answers.length
+    ? Math.round((detail.answers.reduce((n, a) => n + Number(a.score || 0), 0) / detail.answers.length) * 10) / 10
+    : quizSummary.myScore;
   const gradedAnswers = detail ? detail.answers.filter((a) => a.status === 'graded') : [];
   const correctCount = gradedAnswers.filter((a) => a.type !== 'short' && a.score === 100).length;
   const objectiveGraded = gradedAnswers.filter((a) => a.type !== 'short').length;

@@ -746,14 +746,19 @@ app.post('/api/quizzes/:id/submit', auth, requireRole('student'), wrap(async (re
     // 這樣整份測驗的分數、批改狀態才算得出來，不會出現「已批改卻沒有分數」
     for (const q of questionsRes.rows) {
       const content = normalizeAnswer(q, submitted.get(q.id));
-      const score = autoGrade(q.type, q.answer_key, content);
+      let score = autoGrade(q.type, q.answer_key, content);
+      // 簡答題對到關鍵字不代表答對（例如「不是葉綠素」也含有關鍵字）。
+      // 有 AI 可用時先不給分，把關鍵字的分數暫存在 ai_hold，等 AI 判讀：
+      // 判定正確才正式給分；判定不正確就留給老師批改；AI 失敗則退回關鍵字的結果。
+      let hold = null;
+      if (q.type === 'short' && score === 100 && aiWillJudge(req.user)) { hold = score; score = null; }
       if (score === null) allGraded = false;
       await client.query(`
-        INSERT INTO question_answers (quiz_submission_id, question_id, content, score, status)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO question_answers (quiz_submission_id, question_id, content, score, status, ai_hold)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (quiz_submission_id, question_id) DO UPDATE SET
-          content = $3, score = $4, status = $5, feedback = '', ai_feedback = '', ai_status = ''
-      `, [subId, q.id, JSON.stringify(content), score, score === null ? 'submitted' : 'graded']);
+          content = $3, score = $4, status = $5, ai_hold = $6, feedback = '', ai_feedback = '', ai_status = '', ai_verdict = ''
+      `, [subId, q.id, JSON.stringify(content), score, score === null ? 'submitted' : 'graded', hold]);
     }
     if (allGraded) {
       await client.query(
@@ -819,6 +824,23 @@ async function sendSubmissionEvent(subId, event) {
 const DEMO_STUDENT_EMAIL = 'demo.student@demo.com';
 const AI_CONCURRENCY = 3;
 
+// 這位學生的作答會不會送給 AI（有設金鑰，而且不是被關閉 AI 的示範帳號）
+const aiWillJudge = (user) => ai.aiEnabled() && !(user.email === DEMO_STUDENT_EMAIL && !ai.demoAllowed());
+
+// AI 沒辦法判讀（超過每日上限、呼叫失敗）時，把暫存的關鍵字分數還給這一題
+const RELEASE_HOLD = `score = COALESCE(ai_hold, score), status = CASE WHEN ai_hold IS NOT NULL THEN 'graded' ELSE status END, ai_hold = NULL`;
+
+// 某一題的分數因為 AI 判讀而確定之後，檢查整份是不是都批改完了；是的話更新狀態並通知學生
+async function settleSubmission(subId) {
+  const { rows } = await pool.query(`
+    UPDATE quiz_submissions SET status = 'graded', graded_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
+    WHERE id = $1 AND status = 'submitted'
+      AND NOT EXISTS (SELECT 1 FROM question_answers WHERE quiz_submission_id = $1 AND status <> 'graded')
+    RETURNING id
+  `, [subId]);
+  if (rows.length) sendSubmissionEvent(subId, 'quiz.graded').catch((e) => console.error('通知失敗：', e.message));
+}
+
 // 把這份作答裡「還沒有 AI 回饋」的題目標成 pending（或 off / limit），然後在背景逐題產生。
 async function startAiFeedback(subId, user) {
   if (!ai.aiEnabled()) return;
@@ -827,11 +849,11 @@ async function startAiFeedback(subId, user) {
     await pool.query(`UPDATE question_answers SET ai_status = 'off' WHERE quiz_submission_id = $1 AND ai_status IN ('', 'failed', 'limit')`, [subId]);
     return;
   }
-  const usedRes = await pool.query(`
-    SELECT COUNT(*) AS n FROM question_answers qa JOIN quiz_submissions s ON s.id = qa.quiz_submission_id
-    WHERE s.student_id = $1 AND qa.ai_at >= to_char(now(), 'YYYY-MM-DD')
-  `, [user.id]);
-  let remaining = Math.max(0, ai.dailyLimit() - Number(usedRes.rows[0].n));
+  // 用量記在 ai_usage（每人每天一筆累加）。不能用作答紀錄去數：重新作答會覆蓋同一筆紀錄，次數就不會增加
+  const usedRes = await pool.query(
+    `SELECT n FROM ai_usage WHERE student_id = $1 AND day = to_char(now(), 'YYYY-MM-DD')`, [user.id]
+  );
+  let remaining = Math.max(0, ai.dailyLimit() - Number(usedRes.rows[0] ? usedRes.rows[0].n : 0));
   const todo = await pool.query(
     `SELECT id FROM question_answers WHERE quiz_submission_id = $1 AND ai_status IN ('', 'failed', 'limit') ORDER BY id`, [subId]
   );
@@ -841,9 +863,16 @@ async function startAiFeedback(subId, user) {
       ids.push(r.id); remaining -= 1;
       await pool.query(`UPDATE question_answers SET ai_status = 'pending', ai_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = $1`, [r.id]);
     } else {
-      await pool.query(`UPDATE question_answers SET ai_status = 'limit' WHERE id = $1`, [r.id]);
+      await pool.query(`UPDATE question_answers SET ai_status = 'limit', ${RELEASE_HOLD} WHERE id = $1`, [r.id]);
     }
   }
+  if (ids.length) {
+    await pool.query(`
+      INSERT INTO ai_usage (student_id, day, n) VALUES ($1, to_char(now(), 'YYYY-MM-DD'), $2)
+      ON CONFLICT (student_id, day) DO UPDATE SET n = ai_usage.n + $2
+    `, [user.id, ids.length]);
+  }
+  await settleSubmission(subId);
   // 不 await：讓呼叫端可以立刻結束；內部自己處理錯誤
   runAiQueue(ids).catch((e) => console.error('AI 回饋執行失敗：', e.message));
 }
@@ -861,24 +890,36 @@ async function runAiQueue(ids) {
 
 async function generateOne(answerId) {
   const { rows } = await pool.query(`
-    SELECT qa.id, qa.content, qa.score, q.description, q.type, q.options, q.answer_key, q.explanation
+    SELECT qa.id, qa.quiz_submission_id, qa.content, qa.score, q.description, q.type, q.options, q.answer_key, q.explanation
     FROM question_answers qa JOIN questions q ON q.id = qa.question_id
     WHERE qa.id = $1 AND qa.ai_status = 'pending'
   `, [answerId]);
   const row = rows[0];
   if (!row) return;
-  let text = '', status = 'done';
+  let text = '', status = 'done', verdict = '';
   try {
-    text = await ai.callClaude(ai.buildUserMessage(row, parse));
+    if (row.type === 'short') {
+      // 簡答題：AI 同時判讀對錯（verdict）和寫回饋
+      ({ verdict, feedback: text } = await ai.judgeShort(ai.buildUserMessage(row, parse)));
+    } else {
+      text = await ai.callClaude(ai.buildUserMessage(row, parse));
+    }
   } catch (e) {
     console.error(`AI 回饋失敗（answer ${answerId}）：`, e.message);
     status = 'failed';
   }
-  // 條件包含 content：學生若在這段時間內重新作答，舊的結果不會蓋掉新的
-  await pool.query(
-    `UPDATE question_answers SET ai_feedback = $1, ai_status = $2 WHERE id = $3 AND ai_status = 'pending' AND content = $4`,
-    [text, status, answerId, row.content]
-  );
+  // 條件包含 content：學生若在這段時間內重新作答，舊的結果不會蓋掉新的。
+  // 暫存分數（ai_hold）的處理：AI 判定正確才給分；判定不正確就維持待批改交給老師；AI 失敗則退回關鍵字的分數。
+  // 老師若已經先手動批改，ai_hold 會是 NULL，這裡就不會動到分數。
+  const giveHold = status === 'failed' || verdict === 'correct';
+  await pool.query(`
+    UPDATE question_answers SET ai_feedback = $1, ai_status = $2, ai_verdict = $5,
+      score = CASE WHEN ai_hold IS NOT NULL AND $6 THEN ai_hold ELSE score END,
+      status = CASE WHEN ai_hold IS NOT NULL AND $6 THEN 'graded' ELSE status END,
+      ai_hold = NULL
+    WHERE id = $3 AND ai_status = 'pending' AND content = $4
+  `, [text, status, answerId, row.content, verdict, giveHold]);
+  await settleSubmission(row.quiz_submission_id);
 }
 
 // 學生按「重新產生」：只處理失敗或超過上限而沒產生的題目
@@ -930,6 +971,7 @@ app.get('/api/quizzes/:id/submissions', auth, requireRole('teacher'), wrap(async
         status: a.status,
         aiFeedback: a.ai_feedback || '',
         aiStatus: a.ai_status || '',
+        aiVerdict: a.ai_verdict || '',
       })),
     });
   }
@@ -963,7 +1005,7 @@ app.post('/api/quiz-submissions/:id/grade', auth, requireRole('teacher'), wrap(a
     await client.query('BEGIN');
     for (const a of answers) {
       await client.query(
-        `UPDATE question_answers SET score = $1, feedback = $2, status = 'graded' WHERE id = $3 AND quiz_submission_id = $4`,
+        `UPDATE question_answers SET score = $1, feedback = $2, status = 'graded', ai_hold = NULL WHERE id = $3 AND quiz_submission_id = $4`,
         [a.score, String(a.feedback || '').slice(0, 2000), a.answerId, sub.id]
       );
     }
@@ -1049,6 +1091,7 @@ app.get('/api/quizzes/:id/my-submission', auth, requireRole('student'), wrap(asy
       status: a.status,
       aiFeedback: a.ai_feedback || '',
       aiStatus: a.ai_status || '',
+        aiVerdict: a.ai_verdict || '',
     })),
   });
 }));

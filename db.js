@@ -107,6 +107,18 @@ async function init() {
   await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_feedback TEXT NOT NULL DEFAULT ''`);
   await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_status TEXT NOT NULL DEFAULT ''`);
   await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_at TEXT`);
+  // 簡答題的 AI 判讀：ai_verdict 為 correct / partial / incorrect；ai_hold 是等 AI 判讀期間暫存的關鍵字分數
+  await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_verdict TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE question_answers ADD COLUMN IF NOT EXISTS ai_hold REAL`);
+  // 每位學生每天用了幾次 AI（用來套用 AI_DAILY_LIMIT）
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      student_id INTEGER NOT NULL REFERENCES users(id),
+      day        TEXT NOT NULL,
+      n          INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (student_id, day)
+    )
+  `);
 }
 
 module.exports = { pool, init };
