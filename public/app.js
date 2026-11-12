@@ -356,7 +356,7 @@ function useAutoRefresh(fn, ms = 8000) {
   }, [ms]);
 }
 
-function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
+function TeacherHome({ user, onEnterCourse, onEnterAttendance, onEnterRoster, onEnterGrading }) {
   const [classes, setClasses] = useState([]);
   const [stats, setStats] = useState(null);
   const [name, setName] = useState('');
@@ -424,7 +424,8 @@ function TeacherHome({ user, onEnterCourse, onEnterManage, onEnterGrading }) {
             <button className="ghost" onClick={() => onEnterGrading(c)}>
               教師回饋
             </button>
-            <button className="ghost" onClick={() => onEnterManage(c)}>班級管理</button>
+            <button className="ghost" onClick={() => onEnterAttendance(c)}>點名</button>
+            <button className="ghost" onClick={() => onEnterRoster(c)}>班級名單</button>
             <button className="danger" onClick={() => deleteClass(c)}>刪除課程</button>
           </div>
         </div>
@@ -914,51 +915,28 @@ function TeacherGrading({ cls, onBack }) {
   );
 }
 
-function TeacherManage({ cls, onBack }) {
-  const [roster, setRoster] = useState([]);
-  const [email, setEmail] = useState('');
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
+// 點名頁：選日期、逐一標記出席／遲到／缺席後儲存
+function TeacherAttendance({ cls, onBack }) {
   const [date, setDate] = useState(todayStr());
-  const [attendance, setAttendance] = useState([]);
-  const [savingAttendance, setSavingAttendance] = useState(false);
+  const [attendance, setAttendance] = useState(null);
+  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState('');
 
-  const loadRoster = useCallback(() => api('/classes/' + cls.id + '/roster').then(setRoster), [cls.id]);
   const loadAttendance = useCallback(() => {
     api('/classes/' + cls.id + '/attendance?date=' + date).then((d) => setAttendance(d.roster));
   }, [cls.id, date]);
-
-  useEffect(() => { loadRoster(); }, [loadRoster]);
-  useEffect(() => { loadAttendance(); setSaved(false); }, [loadAttendance]);
-  // 自動更新名單：新加入的學生補進點名表，已經勾好但還沒儲存的點名不會被蓋掉
+  useEffect(() => { setAttendance(null); loadAttendance(); setSaved(false); }, [loadAttendance]);
+  // 自動更新：新加入的學生補進點名表，已經勾好但還沒儲存的點名不會被蓋掉
   useAutoRefresh(async () => {
-    await loadRoster();
     const d = await api('/classes/' + cls.id + '/attendance?date=' + date);
     setAttendance((cur) => {
+      if (!cur) return d.roster;
       const have = new Set(cur.map((r) => r.studentId));
       const keep = new Set(d.roster.map((r) => r.studentId));
       return [...cur.filter((r) => keep.has(r.studentId)), ...d.roster.filter((r) => !have.has(r.studentId))];
     });
   });
-
-  const addStudent = async (e) => {
-    e.preventDefault();
-    setErr(''); setBusy(true);
-    try {
-      await api('/classes/' + cls.id + '/roster', { method: 'POST', body: { email } });
-      setEmail('');
-      loadRoster();
-      loadAttendance();
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
-  };
-
-  const removeStudent = async (studentId) => {
-    await api('/classes/' + cls.id + '/roster/' + studentId, { method: 'DELETE' });
-    loadRoster();
-    loadAttendance();
-  };
 
   const setStatus = (studentId, status) => {
     setAttendance((list) => list.map((r) => (r.studentId === studentId ? { ...r, status } : r)));
@@ -966,27 +944,39 @@ function TeacherManage({ cls, onBack }) {
   };
 
   const saveAttendance = async () => {
-    setSavingAttendance(true);
+    setSaving(true); setErr('');
     try {
       await api('/classes/' + cls.id + '/attendance', {
         method: 'POST',
         body: { date, records: attendance.filter((r) => r.status).map((r) => ({ studentId: r.studentId, status: r.status })) },
       });
       setSaved(true);
-    } finally { setSavingAttendance(false); }
+    } catch (e) { setErr(e.message); } finally { setSaving(false); }
   };
+
+  const list = attendance || [];
+  const count = (st) => list.filter((r) => r.status === st).length;
+  const unmarked = list.filter((r) => !r.status).length;
 
   return (
     <div className="wrap">
       <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回首頁</button>
-      <h1>{cls.name} · 班級管理</h1>
-      <p className="muted">加入代碼：<strong style={{ letterSpacing: 2 }}>{cls.joinCode}</strong>（給學生自行加入，或用下方 email 手動加入）</p>
-
+      <h1>{cls.name} · 點名</h1>
       <div className="card">
-        <h2>點名 — {date}</h2>
-        <label style={{ maxWidth: 200 }}>日期<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
-        {attendance.length === 0 && <p className="muted">班上還沒有學生。</p>}
-        {attendance.map((r) => (
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-end' }}>
+          <label style={{ maxWidth: 200, marginTop: 0 }}>日期<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+          {list.length > 0 && (
+            <div className="row">
+              <span className="tag ok">出席 {count('present')}</span>
+              <span className="tag wait">遲到 {count('late')}</span>
+              <span className="tag">缺席 {count('absent')}</span>
+              {unmarked > 0 && <span className="tag">未點 {unmarked}</span>}
+            </div>
+          )}
+        </div>
+        {!attendance && <div className="loading"><span className="spinner" /> 載入中…</div>}
+        {attendance && list.length === 0 && <p className="muted">班上還沒有學生，先到「班級名單」加入學生。</p>}
+        {list.map((r) => (
           <div className="row" key={r.studentId} style={{ justifyContent: 'space-between', marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
             <div>
               <strong>{r.name}</strong> <span className="muted">{r.email}</span>
@@ -1000,31 +990,71 @@ function TeacherManage({ cls, onBack }) {
             </div>
           </div>
         ))}
-        {attendance.length > 0 && (
+        {list.length > 0 && (
           <div style={{ marginTop: 14 }}>
-            <button disabled={savingAttendance} onClick={saveAttendance}>儲存點名</button>
+            {err && <div className="err" style={{ marginBottom: 8 }}>{err}</div>}
+            <button disabled={saving} onClick={saveAttendance}>儲存點名</button>
             {saved && <span className="tag ok" style={{ marginLeft: 10 }}>已儲存</span>}
           </div>
         )}
       </div>
+    </div>
+  );
+}
 
+// 班級名單頁：加入代碼、用 email 加入學生、移除學生
+function TeacherRoster({ cls, onBack }) {
+  const [roster, setRoster] = useState(null);
+  const [email, setEmail] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const loadRoster = useCallback(() => api('/classes/' + cls.id + '/roster').then(setRoster), [cls.id]);
+  useEffect(() => { loadRoster(); }, [loadRoster]);
+  useAutoRefresh(loadRoster);
+
+  const addStudent = async (e) => {
+    e.preventDefault();
+    setErr(''); setBusy(true);
+    try {
+      await api('/classes/' + cls.id + '/roster', { method: 'POST', body: { email } });
+      setEmail('');
+      loadRoster();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const removeStudent = async (st) => {
+    if (!window.confirm('要把「' + st.name + '」移出這門課嗎？')) return;
+    try {
+      await api('/classes/' + cls.id + '/roster/' + st.id, { method: 'DELETE' });
+      loadRoster();
+    } catch (e) { setErr(e.message); }
+  };
+
+  return (
+    <div className="wrap">
+      <button className="ghost" onClick={onBack}><Icon name="arrow-left" /> 返回首頁</button>
+      <h1>{cls.name} · 班級名單</h1>
+      <p className="muted">加入代碼：<strong style={{ letterSpacing: 2 }}>{cls.joinCode}</strong>（給學生自行加入，或用下方 email 手動加入）</p>
       <form className="card" onSubmit={addStudent}>
-        <h2>編輯班級名單</h2>
+        <h2>加入學生</h2>
         <div className="row">
           <input style={{ flex: 1 }} type="email" placeholder="學生 email（需已註冊為學生帳號）" value={email} onChange={(e) => setEmail(e.target.value)} required />
           <button disabled={busy}>加入名單</button>
         </div>
         {err && <div className="err">{err}</div>}
-        <div style={{ marginTop: 14 }}>
-          {roster.length === 0 && <p className="muted">還沒有學生加入這個課程。</p>}
-          {roster.map((s) => (
-            <div className="row" key={s.id} style={{ justifyContent: 'space-between', borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 8 }}>
-              <div><strong>{s.name}</strong> <span className="muted">{s.email}</span></div>
-              <button type="button" className="danger" onClick={() => removeStudent(s.id)}>移除</button>
-            </div>
-          ))}
-        </div>
       </form>
+      <div className="card">
+        <h2>目前名單{roster ? '（' + roster.length + ' 人）' : ''}</h2>
+        {!roster && <div className="loading"><span className="spinner" /> 載入中…</div>}
+        {roster && roster.length === 0 && <p className="muted">還沒有學生加入這個課程。</p>}
+        {(roster || []).map((st) => (
+          <div className="row" key={st.id} style={{ justifyContent: 'space-between', borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 8 }}>
+            <div><strong>{st.name}</strong> <span className="muted">{st.email}</span></div>
+            <button type="button" className="danger" onClick={() => removeStudent(st)}>移除</button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1039,15 +1069,19 @@ function TeacherApp({ user }) {
   if (view === 'grading' && cls) {
     return <TeacherGrading cls={cls} onBack={() => setView('home')} />;
   }
-  if (view === 'manage' && cls) {
-    return <TeacherManage cls={cls} onBack={() => setView('home')} />;
+  if (view === 'attendance' && cls) {
+    return <TeacherAttendance cls={cls} onBack={() => setView('home')} />;
+  }
+  if (view === 'roster' && cls) {
+    return <TeacherRoster cls={cls} onBack={() => setView('home')} />;
   }
   return (
     <TeacherHome
       user={user}
       onEnterCourse={(c) => { setCls(c); setView('course'); }}
       onEnterGrading={(c) => { setCls(c); setView('grading'); }}
-      onEnterManage={(c) => { setCls(c); setView('manage'); }}
+      onEnterAttendance={(c) => { setCls(c); setView('attendance'); }}
+      onEnterRoster={(c) => { setCls(c); setView('roster'); }}
     />
   );
 }
